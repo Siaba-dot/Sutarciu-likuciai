@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-from decimal import Decimal, ROUND_DOWN
 from datetime import date
 
 st.header("📥 Įkėlimas")
@@ -13,13 +12,11 @@ inv_file = st.file_uploader("Įkelk Sąskaitos.xlsx", type=["xlsx"], key="inv")
 st.write("**Kreditines.xlsx** – A: Data, B: Kreditinės Nr., D: Klientas, E: Pastabos, **F: Suma su PVM**, 6: Valiuta")
 crn_file = st.file_uploader("Įkelk Kreditines.xlsx", type=["xlsx"], key="crn")
 
-colF1, colF2, colF3 = st.columns(3)
+colF1, colF2 = st.columns(2)
 with colF1:
     date_from = st.date_input("Laikotarpis nuo", value=date(date.today().year, 1, 1), key="date_from")
 with colF2:
     date_to = st.date_input("Laikotarpis iki", value=date.today(), key="date_to")
-with colF3:
-    pvm = st.number_input("PVM tarifas", value=0.21, min_value=0.0, max_value=1.0, step=0.01, key="pvm")
 
 @st.cache_data
 def read_excel(file, sheet=0):
@@ -32,18 +29,6 @@ def extract_contract(txt: str):
     m = PAT.search(str(txt))
     return m.group(0) if m else None
 
-def floor2(x):
-    try:
-        d = Decimal(str(x))
-        return float(d.quantize(Decimal("0.01"), rounding=ROUND_DOWN))
-    except:
-        return np.nan
-
-def to_net(gross, vat):
-    if pd.isna(gross): return np.nan
-    d = Decimal(str(gross)) / (Decimal("1.00") + Decimal(str(vat)))
-    return float(d.quantize(Decimal("0.01"), rounding=ROUND_DOWN))
-
 if inv_file:
     raw = read_excel(inv_file)
     inv = pd.DataFrame({
@@ -55,12 +40,14 @@ if inv_file:
         "Suma_su_PVM": pd.to_numeric(raw[6], errors="coerce"),
         "Valiuta": raw[7]
     })
-    inv = inv[(inv["Valiuta"]=="EUR") & inv["Data"].notna()]
+    inv = inv[(inv["Valiuta"]=="EUR") & inv["Data"].notna()].copy()
     inv["SutartiesID"] = inv["Sutarties_raw"].astype(str).apply(extract_contract)
     inv.loc[inv["SutartiesID"].isna(), "SutartiesID"] = inv["Pastabos"].apply(extract_contract)
-    inv["Suma_be_PVM"] = inv["Suma_su_PVM"].apply(lambda x: to_net(x, pvm))
     inv = inv[(inv["Data"].dt.date >= date_from) & (inv["Data"].dt.date <= date_to)].copy()
-    st.subheader("Sąskaitos (filtruotos)")
+    # Tipų ir tarpų sanitarija
+    inv["Klientas"] = inv["Klientas"].astype(str).str.strip()
+    inv["SutartiesID"] = inv["SutartiesID"].astype(str).str.strip()
+    st.subheader("Sąskaitos (filtruotos, SUMOS SU PVM)")
     st.dataframe(inv.head(100), use_container_width=True)
     st.session_state["inv_norm"] = inv
 
@@ -74,11 +61,14 @@ if crn_file:
         "Suma_su_PVM": pd.to_numeric(raw[5], errors="coerce"),
         "Valiuta": raw[6]
     })
-    crn = crn[(crn["Valiuta"]=="EUR") & crn["Data"].notna()]
+    crn = crn[(crn["Valiuta"]=="EUR") & crn["Data"].notna()].copy()
     crn["SutartiesID"] = crn["Pastabos"].apply(extract_contract)
-    crn["Suma_be_PVM"] = -crn["Suma_su_PVM"].apply(lambda x: to_net(x, pvm))  # MINUSAS
+    # Kreditinių sumas darome neigiamas (SU PVM)
+    crn["Suma_su_PVM"] = -crn["Suma_su_PVM"].astype(float)
     crn = crn[(crn["Data"].dt.date >= date_from) & (crn["Data"].dt.date <= date_to)].copy()
-    st.subheader("Kreditinės (filtruotos)")
+    crn["Klientas"] = crn["Klientas"].astype(str).str.strip()
+    crn["SutartiesID"] = crn["SutartiesID"].astype(str).str.strip()
+    st.subheader("Kreditinės (filtruotos, SUMOS SU PVM)")
     st.dataframe(crn.head(100), use_container_width=True)
     st.session_state["crn_norm"] = crn
 
