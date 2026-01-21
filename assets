@@ -1,6 +1,0 @@
-:root{ --bg:#0b0f14; --fg:#e6f0ff; --neon:#00E5FF; --neon2:#39FF14; --grid:#1f2a38; }
-[data-testid="stAppViewContainer"]{ background:var(--bg); color:var(--fg); }
-.block-container{ padding-top:1rem; }
-h1,h2,h3{ color:var(--neon); }
-div.stMetric{ background:#0f141b; border:1px solid #1f2a38; border-radius:10px; padding:8px; }
-a{ color:var(--neon2) !important; }
