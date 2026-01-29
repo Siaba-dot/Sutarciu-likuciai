@@ -1,19 +1,30 @@
-# pages/01_📥_Įkėlimas.py
 import streamlit as st
 import pandas as pd
 
 st.header("📥 Įkėlimas")
 
-def read_by_letters(file_or_buf, 
-                    col_map=("A","B","D","F","G"),
+def read_by_letters(file_or_buf,
                     names=("Data","Saskaitos_NR","Klientas","SutartiesID","Suma")) -> pd.DataFrame:
-    df = pd.read_excel(file_or_buf, header=None, engine="openpyxl", usecols=list(col_map))
+    """
+    Skaito Excel BE antraščių ir paima konkrečius stulpelius:
+    A=Data, B=Sąskaitos_NR, D=Klientas, F=SutartiesID, G=Suma.
+    """
+    df = pd.read_excel(
+        file_or_buf,
+        header=None,
+        engine="openpyxl",
+        usecols="A,B,D,F,G"  # <- svarbu: vienas string, o ne sąrašas
+    )
     df.columns = list(names)
+
+    # Tipų sanitarija
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
     df["Suma"] = pd.to_numeric(df["Suma"], errors="coerce")
     for c in ("Klientas","SutartiesID","Saskaitos_NR"):
         df[c] = df[c].astype(str).str.strip()
-    df["Suma_su_PVM"] = df["Suma"].fillna(0.0)  # pas tave be PVM
+
+    # Pas tave be PVM -> lygu Suma
+    df["Suma_su_PVM"] = df["Suma"].fillna(0.0)
     return df
 
 col1, col2 = st.columns(2)
