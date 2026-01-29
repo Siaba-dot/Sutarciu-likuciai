@@ -1,75 +1,196 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
+from datetime import date
 
 st.header("📈 Dokumentų kiekio dinamika (MoM & WoW)")
 
-inv = st.session_state.get("inv_norm")
-crn = st.session_state.get("crn_norm")
+# ========= Pagalbinės =========
+def ensure_df(src):
+    if src is None:
+        return None
+    return src if isinstance(src, pd.DataFrame) else None
 
-if inv is None and (crn is None or crn.empty):
+def pick_id_column(df: pd.DataFrame) -> str | None:
+    """
+    Bando rasti dokumento ID stulpelį keliomis versijomis.
+    Pirmenybė: 'Saskaitos_NR', vėliau – alternatyvūs pavadinimai.
+    """
+    candidates = [
+        "Saskaitos_NR", "SaskaitosNr", "InvoiceNo", "Dok_ID", "DokID", "Dokumento_Nr",
+        "DokumentoNr", "DokNumeris", "Numeris", "No"
+    ]
+    cols = set(df.columns)
+    for c in candidates:
+        if c in cols:
+            return c
+    # jei neranda – grąžina None
+    return None
+
+def counts(df: pd.DataFrame, id_col: str, granularity: str) -> pd.DataFrame:
+    """
+    Grąžina DF su stulpeliais: Periodas, Kiekis
+    granularity: 'M' (mėnuo) arba 'W' (savaitė, ISO savaitė)
+    """
+    d = df.copy()
+    d["Data"] = pd.to_datetime(d["Data"], errors="coerce")
+    d = d.dropna(subset=["Data"])
+
+    if granularity == "M":
+        period = d["Data"].dt.to_period("M").astype(str)  # YYYY-MM
+    else:
+        # ISO savaitės numeris (YYYY-Www)
+        # Pastaba: to_period('W-MON') gražiai sulaužo savaitėmis nuo pirmadienio
+        period = d["Data"].dt.to_period("W-MON").astype(str)
+
+    x = (
+        d.assign(Periodas=period)
+         .groupby("Periodas")[id_col]
+         .nunique()
+         .reset_index(name="Kiekis")
+         .sort_values("Periodas")
+         .reset_index(drop=True)
+    )
+    return x
+
+def moving_average(series: pd.Series, window: int) -> pd.Series:
+    return series.rolling(window=window, min_periods=1).mean()
+
+def min_max_date(*dfs):
+    dates = pd.concat([d["Data"] for d in dfs if d is not None and "Data" in d.columns], axis=0)
+    dates = pd.to_datetime(dates, errors="coerce").dropna()
+    if dates.empty:
+        today = pd.Timestamp.today().normalize()
+        return today, today
+    return dates.min().normalize(), dates.max().normalize()
+
+# ========= Duomenys iš sesijos =========
+inv = ensure_df(st.session_state.get("inv_norm"))
+crn = ensure_df(st.session_state.get("crn_norm"))
+
+if inv is None:
     st.warning("Įkelk duomenis skiltyje **📥 Įkėlimas**.")
     st.stop()
 
-gran = st.radio("Periodiškumas", ["Mėnuo (MoM)", "Savaitė (WoW)"], horizontal=True)
+# Tipų sanitarija
+frames = [inv] if crn is None else [inv, crn]
+for df in frames:
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    # Jei naudotojas netyčia įmetė kitą pavadinimą – susikuriam 'Saskaitos_NR' dublerį diagnostikai
+    if "Saskaitos_NR" not in df.columns:
+        pass  # realiai 'pick_id_column' pats suras tinkamą stulpelį
+
+# ========= UI: Periodiškumas & slankus vidurkis =========
+st.subheader("Periodiškumas")
+gran = st.radio(" ", options=["Mėnuo (MoM)", "Savaitė (WoW)"], horizontal=True, index=0)
+gran_key = "M" if "Mėnuo" in gran else "W"
+
 show_ma = st.toggle("Rodyti slankų vidurkį (3 mėn. / 4 sav.)", value=True)
 
-def counts(df: pd.DataFrame, id_col: str, gran_: str):
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["Periodas","Kiekis"])
-    if gran_ == "Mėnuo (MoM)":
-        x = df.assign(Periodas = df["Data"].dt.to_period("M").astype(str))               .groupby("Periodas")[id_col].nunique().reset_index(name="Kiekis")
-        return x.sort_values("Periodas")
-    else:
-        iso = df["Data"].dt.isocalendar()
-        lab = iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
-        x = df.assign(Periodas = lab).groupby("Periodas")[id_col].nunique().reset_index(name="Kiekis")
-        ord = df.assign(Periodas=lab).groupby("Periodas")["Data"].min().sort_values().index
-        return x.set_index("Periodas").loc[ord].reset_index()
+# ========= Laikotarpis =========
+dmin, dmax = min_max_date(inv, crn)
+rng = st.date_input(
+    "Laikotarpis (nuo – iki)",
+    value=(dmin.date(), dmax.date()),
+    min_value=dmin.date(),
+    max_value=max(dmax.date(), dmin.date()),
+    format="YYYY-MM-DD"
+)
+if isinstance(rng, (tuple, list)) and len(rng) == 2:
+    nuo, iki = rng
+elif isinstance(rng, date):
+    nuo, iki = rng, rng
+else:
+    nuo, iki = dmin.date(), dmax.date()
 
-def pct_delta(series: pd.Series):
-    if series is None or series.size < 2: return None
-    last, prev = series.iloc[-1], series.iloc[-2]
-    if prev == 0: return None
-    return (last - prev) / prev * 100.0
+# Filtruojam datas
+mask_inv = inv["Data"].dt.date.between(nuo, iki)
+inv_f = inv.loc[mask_inv].copy()
+crn_f = None
+if crn is not None:
+    mask_crn = crn["Data"].dt.date.between(nuo, iki)
+    crn_f = crn.loc[mask_crn].copy()
 
-inv_cnt = counts(inv, "SaskaitosNr", gran) if inv is not None else pd.DataFrame(columns=["Periodas","Kiekis"])
-crn_cnt = counts(crn, "KreditinesNr", gran) if crn is not None else pd.DataFrame(columns=["Periodas","Kiekis"])
+if inv_f.empty and (crn_f is None or crn_f.empty):
+    st.info("Pasirinktame laikotarpyje dokumentų nerasta.")
+    st.stop()
 
-momwow = "WoW" if gran == "Savaitė (WoW)" else "MoM"
+# ========= ID stulpelis (automatinė paieška) =========
+id_col_inv = pick_id_column(inv_f)
+id_col_crn = pick_id_column(crn_f) if crn_f is not None and not crn_f.empty else None
 
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Sąskaitų skaičius", f"{(inv_cnt['Kiekis'].iloc[-1] if len(inv_cnt)>0 else 0):,}".replace(",", " "))
-kpi2.metric(f"{momwow} % (sąskaitos)", 
-            f"{pct_delta(inv_cnt['Kiekis']):.1f}%" if len(inv_cnt)>1 and pct_delta(inv_cnt['Kiekis']) is not None else "—")
-kpi3.metric("Kreditinių skaičius", f"{(crn_cnt['Kiekis'].iloc[-1] if len(crn_cnt)>0 else 0):,}".replace(",", " "))
-kpi4.metric(f"{momwow} % (kreditinės)", 
-            f"{pct_delta(crn_cnt['Kiekis']):.1f}%" if len(crn_cnt)>1 and pct_delta(crn_cnt['Kiekis']) is not None else "—")
+missing = []
+if id_col_inv is None:
+    missing.append("Sąskaitoms (inv)")
+if crn_f is not None and not crn_f.empty and id_col_crn is None:
+    missing.append("Kreditinėms (crn)")
 
-inv_cnt["Tipas"] = "Sąskaitos"
-crn_cnt["Tipas"] = "Kreditinės"
-both = pd.concat([inv_cnt, crn_cnt], ignore_index=True)
+if missing:
+    with st.expander("Diagnostika: trūksta dokumento Nr. stulpelio"):
+        st.write("Neradau šių rinkinų ID stulpelio (ieškoti bandžiau: 'Saskaitos_NR', 'SaskaitosNr', 'InvoiceNo', 'Dok_ID' ir kt.).")
+        st.write("inv_f stulpeliai:", list(inv_f.columns))
+        if crn_f is not None:
+            st.write("crn_f stulpeliai:", list(crn_f.columns))
+    st.error("Nerastas dokumento numerio stulpelis. Įkėlime naudok A,B,D,F,G schemą arba pervardink stulpelį į 'Saskaitos_NR'.")
+    st.stop()
 
-st.subheader("📊 Kiekio dinamika")
-fig = px.line(both, x="Periodas", y="Kiekis", color="Tipas", markers=True,
-              title=f"Dokumentų kiekis per laiką – {gran}")
-fig.update_layout(template="plotly_dark", hovermode="x unified")
-st.plotly_chart(fig, use_container_width=True)
+# ========= Kiekiai =========
+inv_cnt = counts(inv_f, id_col_inv, gran_key) if id_col_inv else pd.DataFrame(columns=["Periodas","Kiekis"])
+if crn_f is not None and not crn_f.empty and id_col_crn:
+    crn_cnt = counts(crn_f, id_col_crn, gran_key)
+else:
+    crn_cnt = pd.DataFrame(columns=["Periodas","Kiekis"])
 
-if show_ma and not both.empty:
-    window = 3 if gran == "Mėnuo (MoM)" else 4
-    both = both.sort_values(["Tipas","Periodas"])
-    both["MA"] = both.groupby("Tipas")["Kiekis"].transform(lambda s: s.rolling(window, min_periods=1).mean())
-    st.subheader(f"Slankus vidurkis ({window} {'mėn.' if window==3 else 'sav.'})")
-    fig2 = px.line(both, x="Periodas", y="MA", color="Tipas", title="Slankus vidurkis")
-    fig2.update_layout(template="plotly_dark", hovermode="x unified")
-    st.plotly_chart(fig2, use_container_width=True)
+# Sujungiame: +Kreditinės skaičiuojamos kaip atskirų dokumentų kiekis
+all_cnt = (
+    pd.merge(inv_cnt, crn_cnt, how="outer", on="Periodas", suffixes=("_inv","_crn"))
+      .fillna(0)
+      .assign(Kiekis=lambda d: d["Kiekis_inv"] + d["Kiekis_crn"])
+      [["Periodas","Kiekis"]]
+      .sort_values("Periodas")
+      .reset_index(drop=True)
+)
 
-colt1, colt2 = st.columns(2)
-with colt1:
-    st.write("Sąskaitų skaičius pagal periodą")
-    st.dataframe(inv_cnt, use_container_width=True)
-with colt2:
-    st.write("Kreditinių skaičius pagal periodą")
-    st.dataframe(crn_cnt, use_container_width=True)
+if all_cnt.empty:
+    st.info("Pasirinktame laikotarpyje dokumentų nerasta.")
+    st.stop()
+
+# ========= Braižymas =========
+st.subheader("Kiekis per periodus")
+
+# Kad vartotojui būtų patogu – paverskim Periodas į datetime pradžią (vizualiai tvarkingiau)
+def parse_period_start(p: str) -> pd.Timestamp:
+    try:
+        if gran_key == "M":
+            return pd.Period(p, freq="M").start_time
+        else:
+            return pd.Period(p, freq="W-MON").start_time
+    except Exception:
+        return pd.NaT
+
+plot_df = all_cnt.copy()
+plot_df["Pradzia"] = plot_df["Periodas"].apply(parse_period_start)
+plot_df = plot_df.dropna(subset=["Pradzia"]).sort_values("Pradzia").reset_index(drop=True)
+
+if show_ma:
+    window = 3 if gran_key == "M" else 4
+    plot_df["Slankus_vidurkis"] = moving_average(plot_df["Kiekis"], window)
+
+# Paprastas linijinis grafikas (be Altair, kad nekibtų priklausomybės)
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots(figsize=(8, 3))
+ax.plot(plot_df["Pradzia"], plot_df["Kiekis"], marker="o", label="Kiekis")
+if show_ma:
+    ax.plot(plot_df["Pradzia"], plot_df["Slankus_vidurkis"], color="tab:orange", linewidth=2, label="Slankus vidurkis")
+
+ax.set_title("Dokumentų kiekis per periodus")
+ax.set_xlabel("Periodas")
+ax.set_ylabel("Kiekis (vnt.)")
+ax.grid(True, alpha=0.3)
+ax.legend()
+st.pyplot(fig)
+
+# Rodome ir lentelę
+st.subheader("Lentelė")
+st.dataframe(plot_df[["Periodas","Kiekis"] + (["Slankus_vidurkis"] if show_ma else [])], use_container_width=True)
