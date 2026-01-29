@@ -12,13 +12,64 @@ def floor2(x):
     except:  # noqa: E722
         return 0.0
 
-inv = st.session_state.get("inv_norm")
-crn = st.session_state.get("crn_norm")
+# --- NAUJA: užtikrinam nuskaitymą pagal raides ---
+def read_by_letters(file_or_buf, 
+                    col_map=("A","B","D","F","G"),
+                    names=("Data","Saskaitos_NR","Klientas","SutartiesID","Suma")) -> pd.DataFrame:
+    df = pd.read_excel(
+        file_or_buf,
+        header=None,
+        engine="openpyxl",
+        usecols=list(col_map)
+    )
+    df.columns = list(names)
+    if "Data" in df.columns:
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    if "Suma" in df.columns:
+        df["Suma"] = pd.to_numeric(df["Suma"], errors="coerce")
+    for c in ("Klientas","SutartiesID","Saskaitos_NR"):
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
+    df["Suma_su_PVM"] = df["Suma"].fillna(0.0)
+    return df
+
+def ensure_df_from_source(src):
+    if src is None:
+        return None
+    if isinstance(src, pd.DataFrame):
+        # Jei jau DF, patikrinam ar turi reikiamus laukus; jei ne, bandysim „auto“ perskaityti
+        required = {"Data","Saskaitos_NR","Klientas","SutartiesID","Suma_su_PVM"}
+        if required.issubset(set(src.columns)):
+            return src
+        # Jeigu DF neteisingas (pvz., su blogais headeriais), neleisim slinkti toliau
+        # rekomenduotina šaltinyje dėti failo objektą, bet pabandysim minimaliai sutvarkyti:
+        df = src.copy()
+        # Jei turi bent 5 stulpelius, paimsime pagal pozicijas (0=A,1=B,3=D,5=F,6=G)
+        if df.shape[1] >= 7:
+            df = df.iloc[:, [0,1,3,5,6]].copy()
+            df.columns = ["Data","Saskaitos_NR","Klientas","SutartiesID","Suma"]
+            df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+            df["Suma"] = pd.to_numeric(df["Suma"], errors="coerce")
+            for c in ("Klientas","SutartiesID","Saskaitos_NR"):
+                df[c] = df[c].astype(str).str.strip()
+            df["Suma_su_PVM"] = df["Suma"].fillna(0.0)
+            return df
+        return df  # tebūnie, bet vėliau faile matysis diagnostika
+    # Jei src – tai įkeltas failo objektas (UploadedFile/BytesIO)
+    return read_by_letters(src, col_map=("A","B","D","F","G"),
+                                names=("Data","Saskaitos_NR","Klientas","SutartiesID","Suma"))
+
+inv_src = st.session_state.get("inv_norm")
+crn_src = st.session_state.get("crn_norm")
+
+inv = ensure_df_from_source(inv_src)
+crn = ensure_df_from_source(crn_src)
 
 if inv is None:
     st.warning("Įkelk duomenis skiltyje **📥 Įkėlimas**.")
     st.stop()
 
+# ——— Likęs tavo kodas be pakeitimų ———
 # Sanitarija
 frames = [inv] if crn is None else [inv, crn]
 for df in frames:
@@ -66,7 +117,6 @@ plans = st.data_editor(
         ),
     },
 )
-# Tipai
 plans["Klientas"] = plans["Klientas"].astype(str).str.strip()
 plans["SutartiesID"] = plans["SutartiesID"].astype(str).str.strip()
 st.session_state["plans"] = plans
@@ -91,8 +141,6 @@ k1.metric("Išrašyta € (su PVM)", f"{total_israsyta:,.2f}")
 k2.metric("Kredituota € (su PVM)", f"{total_kred:,.2f}")
 k3.metric("Faktas € (su PVM)", f"{total_faktas:,.2f}")
 k4.metric("Likutis € (su PVM)", f"{total_like:,.2f}")
-
-# Pagrindinė lentelė
 
 def progress_bar(p: float) -> str:
     p = 0.0 if pd.isna(p) else float(p)
@@ -121,7 +169,7 @@ cols_order = [
 show_cols = [c for c in cols_order if c in out.columns]
 st.dataframe(out[show_cols].sort_values(["Klientas", "SutartiesID"]), use_container_width=True)
 
-# 🎯 Filtras: Klientas -> Sutartis (konkrečiam likučiui)
+# 🎯 Filtras: Klientas -> Sutartis
 st.divider()
 st.subheader("🎯 Konkrečios sutarties likutis")
 
