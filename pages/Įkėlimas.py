@@ -8,16 +8,17 @@ def read_by_letters(file_or_buf,
     """
     Skaito Excel BE antraščių ir paima konkrečius stulpelius:
     A=Data, B=Sąskaitos_NR, D=Klientas, F=SutartiesID, G=Suma.
+    (SVARBU: usecols – VIENAS string, o ne sąrašas -> nebus ValueError)
     """
     df = pd.read_excel(
         file_or_buf,
         header=None,
         engine="openpyxl",
-        usecols="A,B,D,F,G"  # <- svarbu: vienas string, o ne sąrašas
+        usecols="A,B,D,F,G"
     )
     df.columns = list(names)
 
-    # Tipų sanitarija
+    # Tipai ir sanitarija
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
     df["Suma"] = pd.to_numeric(df["Suma"], errors="coerce")
     for c in ("Klientas","SutartiesID","Saskaitos_NR"):
@@ -33,7 +34,7 @@ with col1:
     inv_file = st.file_uploader("Sąskaitos.xlsx", type=["xlsx"], key="upl_inv")
     if inv_file:
         st.session_state["inv_norm"] = read_by_letters(inv_file)
-        st.success("✅ Sąskaitos nuskaitytos (A,B,D,F,G) ir įrašytos į session_state['inv_norm'].")
+        st.success("✅ Sąskaitos nuskaitytos ir įrašytos į session_state['inv_norm'].")
 
 with col2:
     crn_file = st.file_uploader("Kreditinės.xlsx", type=["xlsx"], key="upl_crn")
