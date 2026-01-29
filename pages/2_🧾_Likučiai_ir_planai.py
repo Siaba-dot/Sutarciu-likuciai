@@ -4,25 +4,34 @@ import numpy as np
 from io import BytesIO
 from decimal import Decimal, ROUND_DOWN
 
+# ======= Antraštė =======
 st.header("🧾 Likučiai ir planai (sumos SU PVM)")
 
+# ======= Pagalbinės funkcijos =======
+
 def floor2(x):
+    """Nukerpa iki 2 skaičių po kablelio (be apvalinimo)."""
     try:
         return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
     except:  # noqa: E722
         return 0.0
 
-# --- NAUJA: užtikrinam nuskaitymą pagal raides ---
 def read_by_letters(file_or_buf, 
                     col_map=("A","B","D","F","G"),
                     names=("Data","Saskaitos_NR","Klientas","SutartiesID","Suma")) -> pd.DataFrame:
+    """
+    Skaito Excel be antraščių ir paima konkrečius stulpelius pagal raides.
+    A=Data, B=Saskaitos_NR, D=Klientas, F=SutartiesID, G=Suma.
+    """
     df = pd.read_excel(
         file_or_buf,
         header=None,
         engine="openpyxl",
-        usecols=list(col_map)
+        usecols=list(col_map)   # ["A","B","D","F","G"]
     )
     df.columns = list(names)
+
+    # Tipų sanitarija
     if "Data" in df.columns:
         df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
     if "Suma" in df.columns:
@@ -30,23 +39,27 @@ def read_by_letters(file_or_buf,
     for c in ("Klientas","SutartiesID","Saskaitos_NR"):
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
+
+    # SU PVM (pagal tavo taisyklę – PVM nenaudojamas, t.y. lygu Suma)
     df["Suma_su_PVM"] = df["Suma"].fillna(0.0)
     return df
 
 def ensure_df_from_source(src):
+    """
+    Priima:
+      - None → grąžina None,
+      - DataFrame → jei trūksta laukų, bando minimaliai suvienodinti,
+      - UploadedFile/BytesIO/kelią → perskaito per read_by_letters.
+    """
     if src is None:
         return None
     if isinstance(src, pd.DataFrame):
-        # Jei jau DF, patikrinam ar turi reikiamus laukus; jei ne, bandysim „auto“ perskaityti
         required = {"Data","Saskaitos_NR","Klientas","SutartiesID","Suma_su_PVM"}
         if required.issubset(set(src.columns)):
             return src
-        # Jeigu DF neteisingas (pvz., su blogais headeriais), neleisim slinkti toliau
-        # rekomenduotina šaltinyje dėti failo objektą, bet pabandysim minimaliai sutvarkyti:
-        df = src.copy()
-        # Jei turi bent 5 stulpelius, paimsime pagal pozicijas (0=A,1=B,3=D,5=F,6=G)
-        if df.shape[1] >= 7:
-            df = df.iloc[:, [0,1,3,5,6]].copy()
+        # Bandome minimaliai sutvarkyti pagal pozicijas (jei ateina DF be teisingų antraščių)
+        if src.shape[1] >= 7:
+            df = src.iloc[:, [0,1,3,5,6]].copy()  # 0=A,1=B,3=D,5=F,6=G
             df.columns = ["Data","Saskaitos_NR","Klientas","SutartiesID","Suma"]
             df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
             df["Suma"] = pd.to_numeric(df["Suma"], errors="coerce")
@@ -54,12 +67,14 @@ def ensure_df_from_source(src):
                 df[c] = df[c].astype(str).str.strip()
             df["Suma_su_PVM"] = df["Suma"].fillna(0.0)
             return df
-        return df  # tebūnie, bet vėliau faile matysis diagnostika
-    # Jei src – tai įkeltas failo objektas (UploadedFile/BytesIO)
+        # Jei nepavyksta – grąžinam kaip yra; žemiau rodysim diagnostiką
+        return src
+    # src – failo objektas
     return read_by_letters(src, col_map=("A","B","D","F","G"),
                                 names=("Data","Saskaitos_NR","Klientas","SutartiesID","Suma"))
 
-inv_src = st.session_state.get("inv_norm")
+# ======= Įkėlimas iš session_state =======
+inv_src = st.session_state.get("inv_norm")  # gali būti DF arba failas
 crn_src = st.session_state.get("crn_norm")
 
 inv = ensure_df_from_source(inv_src)
@@ -69,8 +84,18 @@ if inv is None:
     st.warning("Įkelk duomenis skiltyje **📥 Įkėlimas**.")
     st.stop()
 
-# ——— Likęs tavo kodas be pakeitimų ———
-# Sanitarija
+# Papildoma diagnostika, jei netyčia negavom laukų
+needed_cols = {"Klientas","SutartiesID","Suma_su_PVM"}
+missing_inv = needed_cols - set(inv.columns)
+if missing_inv:
+    with st.expander("Diagnostika: 'inv' trūksta laukų"):
+        st.write("Trūksta:", missing_inv)
+        st.write("Stulpeliai:", list(inv.columns))
+        st.dataframe(inv.head())
+    st.error("Sąskaitų duomenys neteisingi. Patikrink įkėlimą / stulpelių raidžių žemėlapį.")
+    st.stop()
+
+# ======= Sanitarija =======
 frames = [inv] if crn is None else [inv, crn]
 for df in frames:
     df["Klientas"] = df["Klientas"].astype(str).str.strip()
@@ -78,7 +103,7 @@ for df in frames:
         df["SutartiesID"] = ""
     df["SutartiesID"] = df["SutartiesID"].astype(str).str.strip()
 
-# Agregacijos SU PVM
+# ======= Agregacijos SU PVM =======
 inv_sum = (
     inv.groupby(["Klientas", "SutartiesID"], dropna=False)["Suma_su_PVM"]
     .sum()
@@ -86,6 +111,9 @@ inv_sum = (
     .reset_index()
 )
 if crn is not None and not crn.empty:
+    # Apsauga, jei crn netyčia dar nenormalizuotas
+    if not needed_cols.issubset(set(crn.columns)):
+        crn = ensure_df_from_source(crn_src)
     crn_sum = (
         crn.groupby(["Klientas", "SutartiesID"], dropna=False)["Suma_su_PVM"]
         .sum()
@@ -98,7 +126,7 @@ else:
 fact = pd.merge(inv_sum, crn_sum, how="outer", on=["Klientas", "SutartiesID"]).fillna(0.0)
 fact["Faktas"] = fact["Israsyta"] + fact["Kredituota"]
 
-# Planai (editable)
+# ======= Planai (editable) =======
 if "plans" not in st.session_state:
     base = fact[["Klientas", "SutartiesID"]].drop_duplicates().copy()
     base["SutartiesPlanas"] = 0.0  # SU PVM
@@ -121,14 +149,14 @@ plans["Klientas"] = plans["Klientas"].astype(str).str.strip()
 plans["SutartiesID"] = plans["SutartiesID"].astype(str).str.strip()
 st.session_state["plans"] = plans
 
-# Likučiai
+# ======= Likučiai =======
 out = pd.merge(plans, fact, how="left", on=["Klientas", "SutartiesID"]).fillna(0.0)
 out["Israsyta"] = out["Israsyta"].apply(floor2)
 out["Kredituota"] = out["Kredituota"].apply(floor2)
 out["Faktas"] = out["Faktas"].apply(floor2)
 out["Like"] = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
 
-# KPI (viso)
+# ======= KPI (viso) =======
 total_planas = floor2(out["SutartiesPlanas"].sum())
 total_israsyta = floor2(out["Israsyta"].sum())
 total_kred = floor2(out["Kredituota"].sum())
@@ -142,18 +170,19 @@ k2.metric("Kredituota € (su PVM)", f"{total_kred:,.2f}")
 k3.metric("Faktas € (su PVM)", f"{total_faktas:,.2f}")
 k4.metric("Likutis € (su PVM)", f"{total_like:,.2f}")
 
+# ======= Progreso juosta =======
 def progress_bar(p: float) -> str:
     p = 0.0 if pd.isna(p) else float(p)
     p = max(0.0, p)
     blocks = int(min(100.0, p) // 5)
     return "█" * blocks + "░" * (20 - blocks) + f"  {p:.1f}%"
 
-# % išnaudota
 den = out["SutartiesPlanas"].replace(0, np.nan)
 out["PctIsnaudota"] = np.where(den.isna(), 0.0, (out["Faktas"] / den) * 100.0)
 out["PctIsnaudota"] = out["PctIsnaudota"].clip(lower=0, upper=999)
 out["Progresas"] = out["PctIsnaudota"].apply(progress_bar)
 
+# ======= Pagrindinė lentelė =======
 st.subheader("Sutarčių likučiai (SU PVM)")
 cols_order = [
     "Klientas",
@@ -169,7 +198,7 @@ cols_order = [
 show_cols = [c for c in cols_order if c in out.columns]
 st.dataframe(out[show_cols].sort_values(["Klientas", "SutartiesID"]), use_container_width=True)
 
-# 🎯 Filtras: Klientas -> Sutartis
+# ======= 🎯 Filtras: Klientas -> Sutartis =======
 st.divider()
 st.subheader("🎯 Konkrečios sutarties likutis")
 
@@ -208,7 +237,7 @@ if sel_client and sel_contract:
 
         st.dataframe(one[show_cols], use_container_width=True)
 
-        # Export only this selection
+        # Eksportas – tik ši pasirinkta sutartis
         buf_one = BytesIO()
         with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
             one.to_excel(xw, sheet_name=f"{sel_contract}", index=False)
@@ -221,7 +250,7 @@ if sel_client and sel_contract:
 else:
     st.info("Pasirink **Klientą** ir **Sutartį**.")
 
-# Eksportas – visa suvestinė
+# ======= Eksportas – visa suvestinė =======
 buf = BytesIO()
 with pd.ExcelWriter(buf, engine="openpyxl") as xw:
     out.to_excel(xw, sheet_name="Sutarciu_likuciai_SU_PVM", index=False)
@@ -235,4 +264,3 @@ st.download_button(
     file_name="sutarciu_likuciai_SU_PVM.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-
