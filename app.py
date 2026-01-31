@@ -43,7 +43,7 @@ authenticator = stauth.Authenticate(
 )
 
 # --- Prisijungimas ---
-name, auth_status, username = authenticator.login("Prisijungimas", location="main")
+name, auth_status, username = authenticator.login("Prisijungimas")
 if auth_status is False:
     st.error("Neteisingas vartotojo vardas arba slaptažodis.")
     st.stop()
