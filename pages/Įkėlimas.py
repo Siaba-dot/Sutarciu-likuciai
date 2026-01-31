@@ -1,12 +1,12 @@
 import streamlit as st
-import pandas as pd
+
 # Globali sargyba visiems multipage puslapiams
 if not st.session_state.get("logged_in", False):
     # Pasirinktinai – pranešimas (neprivaloma)
     st.warning("Reikia prisijungti.")
     # Grąžinam į pagrindinį puslapį su login forma
     st.switch_page("app.py")   # svarbu: kelias į tavo startinį failą
-
+import pandas as pd
 
 st.header("📥 Įkėlimas")
 
