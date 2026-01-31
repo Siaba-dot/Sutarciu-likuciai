@@ -1,12 +1,40 @@
-import streamlit as st
-
 # pages/3_📈_MoM_WoW_kiekiai.py
-
+import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date
 
+# --- Nauja: Plotly importai ir tema ---
+import plotly.graph_objects as go
+import plotly.io as pio
+
+# Vieningas tamsus/neon šablonas „wow“
+pio.templates["sigita_dark"] = go.layout.Template(
+    layout=dict(
+        template="plotly_dark",
+        font=dict(family="Inter, Segoe UI, system-ui", size=13, color="#E6E6E6"),
+        paper_bgcolor="#0f1116",
+        plot_bgcolor="#0f1116",
+        colorway=["#00E5FF", "#76A9FA", "#22D3EE", "#60A5FA"],
+        hoverlabel=dict(bgcolor="#111827", font_size=13),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        xaxis=dict(gridcolor="#1f2937"),
+        yaxis=dict(gridcolor="#1f2937"),
+    )
+)
+pio.templates.default = "sigita_dark"
+
+# --- Puslapio UI ---
+st.set_page_config(layout="wide")
 st.header("📈 Dokumentų kiekio dinamika (MoM & WoW)")
+
+# Šiek tiek kompaktiškesni tarpai
+st.markdown("""
+<style>
+  .block-container {padding-top: .75rem; padding-bottom: 1rem; max-width: 1500px;}
+  header[data-testid="stHeader"] {height: 0rem;}
+</style>
+""", unsafe_allow_html=True)
 
 # ===================== Pagalbinės =====================
 
@@ -87,6 +115,9 @@ def min_max_date(*dfs):
 
 # ===================== Duomenys iš sesijos =====================
 
+# Tikimės, kad Įkėlimas puslapis paruošia normalizuotus DF:
+#   st.session_state["inv_norm"]  – sąskaitos
+#   st.session_state["crn_norm"]  – kreditinės (galimai tuščia)
 inv = ensure_df(st.session_state.get("inv_norm"))
 crn = ensure_df(st.session_state.get("crn_norm"))
 
@@ -180,7 +211,7 @@ if all_cnt.empty:
     st.info("Pasirinktame laikotarpyje dokumentų nerasta.")
     st.stop()
 
-# ===================== Grafikas (be papildomų priklausomybių) =====================
+# ===================== Grafikas (stulpeliniai + linija) =====================
 
 st.subheader("Kiekis per periodus")
 
@@ -194,12 +225,45 @@ if show_ma:
     window = 3 if gran == "M" else 4
     plot_df["Slankus vidurkis"] = moving_average(plot_df["Kiekis"], window)
 
-# Built-in linijinė diagrama
-chart_df = plot_df.set_index("Pradzia")[["Kiekis"]].copy()
-if show_ma:
-    chart_df["Slankus vidurkis"] = plot_df.set_index("Pradzia")["Slankus vidurkis"]
+# Bar + line figūra (Plotly)
+fig = go.Figure()
 
-st.line_chart(chart_df, height=320, use_container_width=True)
+# Stulpeliai: dokumentų kiekis per periodą (MoM arba WoW)
+fig.add_bar(
+    x=plot_df["Pradzia"],
+    y=plot_df["Kiekis"],
+    name=f"Kiekis per {'mėn.' if gran=='M' else 'sav.'}",
+    marker_color="#00E5FF",
+    opacity=0.45,
+)
+
+# Linija: slankus vidurkis (jei įjungtas)
+if show_ma:
+    fig.add_scatter(
+        x=plot_df["Pradzia"],
+        y=plot_df["Slankus vidurkis"],
+        name=f"Slankus vidurkis ({window} {'mėn.' if gran=='M' else 'sav.'})",
+        mode="lines",
+        line=dict(color="#76A9FA", width=3),
+    )
+
+fig.update_layout(
+    title="Išrašytų dokumentų kiekis per periodą",
+    height=420,
+    bargap=0.12,
+    hovermode="x unified",
+)
+fig.update_xaxes(
+    tickformat="%Y %b" if gran == "M" else "%Y-%m-%d",
+    showgrid=True,
+)
+fig.update_yaxes(
+    title_text="Dokumentų kiekis",
+    rangemode="tozero",
+    showgrid=True,
+)
+
+st.plotly_chart(fig, use_container_width=True)
 
 # ===================== KPI =====================
 
@@ -216,7 +280,6 @@ k3.metric(("Grynas kiekis (su minusu)" if crn_negative else "Bendras kiekis (inv
 # ===================== Lentelė =====================
 
 st.subheader("Lentelė")
-table_cols = ["Periodas", "Kiekis"] + (["Slankus vidurkis"] if show_ma else [])
 display_df = plot_df[["Periodas", "Kiekis"] + (["Slankus vidurkis"] if show_ma else [])].copy()
 st.dataframe(display_df, use_container_width=True)
 
