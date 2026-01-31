@@ -1,3 +1,12 @@
+# pages/3_📈_MoM_WoW_kiekiai.py
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import date
+
+# --- Nauja: Plotly importai ir tema ---
+import plotly.graph_objects as go
+import plotly.io as pio
 st.set_page_config(layout="wide")
 
 # --- Kompaktinis tamsus išdėstymas: mažesni tarpai ir antraščių dydžiai ---
@@ -24,14 +33,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 # pages/3_📈_MoM_WoW_kiekiai.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-from datetime import date
-
-# --- Nauja: Plotly importai ir tema ---
-import plotly.graph_objects as go
-import plotly.io as pio
 
 # Vieningas tamsus/neon šablonas „wow“
 pio.templates["sigita_dark"] = go.layout.Template(
