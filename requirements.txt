@@ -2,5 +2,5 @@ streamlit
 bcrypt
 pandas
 openpyxl
-plotly
+plotly>=5.18
 numpy
