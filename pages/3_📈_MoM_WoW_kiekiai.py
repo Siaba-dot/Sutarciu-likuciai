@@ -1,3 +1,28 @@
+st.set_page_config(layout="wide")
+
+# --- Kompaktinis tamsus išdėstymas: mažesni tarpai ir antraščių dydžiai ---
+st.markdown("""
+<style>
+  /* Pagrindinio konteinerio tarpai ir maksimalus plotis */
+  .block-container {padding-top: 0.5rem; padding-bottom: 0.75rem; max-width: 1500px;}
+
+  /* Paslepiam/kompaktinam Streamlit viršutinį header */
+  header[data-testid="stHeader"] {height: 0rem; visibility: hidden;}
+
+  /* Mažesni H1/H2, kad neužliptų ir tilptų */
+  h1, .stMarkdown h1 {font-size: 1.55rem; line-height: 1.2; margin: 0.2rem 0 0.6rem 0;}
+  h2, .stMarkdown h2 {font-size: 1.25rem; line-height: 1.25; margin: 0.1rem 0 0.4rem 0;}
+  h3, .stMarkdown h3 {font-size: 1.05rem; line-height: 1.25; margin: 0.1rem 0 0.3rem 0;}
+
+  /* Mažesni vertikalūs tarpai tarp valdiklių */
+  div[data-testid="stVerticalBlock"] > div:has(.stRadio), 
+  div[data-testid="stVerticalBlock"] > div:has(.stDateInput),
+  div[data-testid="stVerticalBlock"] > div:has(.stToggle) {margin-top: 0.25rem; margin-bottom: 0.25rem;}
+
+  /* Kompaktinis legendas Plotly (užims mažiau aukščio) */
+  .modebar {transform: scale(0.95); transform-origin: top right;}
+</style>
+""", unsafe_allow_html=True)
 # pages/3_📈_MoM_WoW_kiekiai.py
 import streamlit as st
 import pandas as pd
