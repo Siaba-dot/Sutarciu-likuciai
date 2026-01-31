@@ -1,22 +1,40 @@
 import streamlit as st
 import streamlit_authenticator as stauth
 
-# --- Puslapio nustatymai ---
 st.set_page_config(page_title="Sutarčių likučių skydelis", page_icon="📁", layout="wide")
 
-# --- Auth konfigūracija iš Secrets ---
-auth_conf = st.secrets["auth"]
-creds = {"usernames": {}}
+# --- Diagnozė: parodom versiją ir ar gaunam Secrets ---
+st.caption(f"streamlit-authenticator version: {getattr(stauth, '__version__', 'unknown')}")
 
-# Užpildom vartotojų duomenis iš Secrets
-for i, username in enumerate(st.secrets["credentials"]["users"]):
+# --- Auth konfigas iš Secrets ---
+try:
+    auth_conf = st.secrets["auth"]
+    creds_src = st.secrets["credentials"]
+except Exception as e:
+    st.error("Nerasta [auth] arba [credentials] sekcija Secrets'e. Patikrink App → Settings → Secrets.")
+    st.stop()
+
+users = creds_src.get("users", [])
+names = creds_src.get("names", [])
+passwords = creds_src.get("passwords", [])
+roles = creds_src.get("roles", [])
+
+# Greita validacija
+if not (len(users) == len(names) == len(passwords) == len(roles) and len(users) > 0):
+    st.error("Secrets klaida: users/names/passwords/roles masyvų ilgiai turi sutapti ir būti > 0.")
+    st.write("users:", users)
+    st.write("names:", names)
+    st.write("roles:", roles)
+    st.stop()
+
+creds = {"usernames": {}}
+for i, username in enumerate(users):
     creds["usernames"][username] = {
-        "name": st.secrets["credentials"]["names"][i],
-        "password": st.secrets["credentials"]["passwords"][i],  # čia BCRYPT HASH
-        "role": st.secrets["credentials"]["roles"][i],
+        "name": names[i],
+        "password": passwords[i],  # BCRYPT hash
+        "role": roles[i],
     }
 
-# Sukuriam autentifikatorių
 authenticator = stauth.Authenticate(
     credentials=creds,
     cookie_name=auth_conf["cookie_name"],
@@ -24,25 +42,24 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=auth_conf.get("cookie_expiry_days", 7),
 )
 
-# --- Prisijungimo forma ---
+# --- Prisijungimas ---
 name, auth_status, username = authenticator.login("Prisijungimas", location="main")
 
 if auth_status is False:
     st.error("Neteisingas vartotojo vardas arba slaptažodis.")
     st.stop()
-
 elif auth_status is None:
     st.info("Įvesk prisijungimo duomenis.")
     st.stop()
 
-# ---- Jei prisijungta ----
+# --- Prisijungus ---
 with st.sidebar:
-    st.markdown(f"**👤 {name} ({username})**")
+    st.markdown(f"**👤 {name} (`{username}`)**")
     authenticator.logout("Atsijungti", "sidebar")
-    st.write("---")
+    st.divider()
 
-st.success(f"Sveiki, {name}!")
-
+st.success(f"Sveiki, {name}! Prisijungimas sėkmingas.")
+# --- ČIA toliau dedasi tavo puslapiai ir visas skydelio turinys ---
 st.set_page_config(
     page_title="Sutarčių likučių skydelis",
     page_icon="💼",
