@@ -1,6 +1,6 @@
-streamlit
-streamlit-authenticator
-bcrypt
+streamlit>=1.31
+streamlit-authenticator==0.4.1
+bcrypt==4.1.2
 pandas
 openpyxl
 plotly
