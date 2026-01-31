@@ -2,16 +2,14 @@ import streamlit as st
 import bcrypt
 from typing import Dict, Any
 
-# =========================
-# PUSLAPIO NUSTATYMAI + TEMA
-# =========================
+# =============== PUSLAPIO NUSTATYMAI + TEMA ===============
 st.set_page_config(
     page_title="Sutarčių likučių skydelis",
     page_icon="📁",
     layout="wide",
 )
 
-# --- Tamsi neon CSS (lengvas, nekenkia Streamlit temai) ---
+# --- Tamsi neon CSS (lengvas, nekeičia tavo turinio logikos) ---
 st.markdown("""
 <style>
 :root {
@@ -21,25 +19,31 @@ st.markdown("""
   --text: #E6E6E6;
   --muted: #9AA4B2;
 }
-html, body, [class*="st-"] {
-  background-color: var(--bg);
-  color: var(--text);
-}
-div[data-testid="stSidebar"] {
-  background-color: var(--card);
-  border-right: 1px solid #232A36;
-}
+html, body, [class*="st-"] { background-color: var(--bg); color: var(--text); }
+div[data-testid="stSidebar"] { background-color: var(--card); border-right: 1px solid #232A36; }
 h1, h2, h3 { color: var(--neon); }
 a, .stButton>button { color: var(--neon); }
 .stAlert > div { background-color: #141925; border: 1px solid #263046; }
-.stSuccess > div { border-color: #00FFC6; }
 hr, .stDivider { border-color: #263046 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# SECRETS VALIDACIJA
-# =========================
+# =============== PAGALBINĖ FUNKCIJA RERUN ===============
+def _rerun():
+    # Suderinamumas su skirtingomis Streamlit versijomis
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
+# =============== SECRETS NUSKAITYMAS + VALIDACIJA ===============
+def _is_bcrypt(s: str) -> bool:
+    """Leidžiame $2a$, $2b$, $2y; nuvalom tarpus."""
+    if not isinstance(s, str):
+        return False
+    s = s.strip()
+    return s.startswith("$2a$") or s.startswith("$2b$") or s.startswith("$2y$")
+
 def read_secrets() -> Dict[str, Any]:
     try:
         auth_conf = st.secrets["auth"]
@@ -48,32 +52,30 @@ def read_secrets() -> Dict[str, Any]:
         st.error("❌ Trūksta [auth] arba [credentials] sekcijų Secrets'e. Eik į App → Settings → Secrets.")
         st.stop()
 
-    # Ištraukiam sąrašus
     users = creds.get("users", [])
     names = creds.get("names", [])
     passwords = creds.get("passwords", [])
     roles = creds.get("roles", [])
 
-    # 1) visi sąrašai vienodo ilgio ir ne tušti
+    # 1) visi sąrašai privalo sutapti ilgiu ir būti > 0
     if not (len(users) == len(names) == len(passwords) == len(roles) and len(users) > 0):
         st.error("❌ Secrets klaida: users/names/passwords/roles masyvų ilgiai turi sutapti ir būti > 0.")
         st.stop()
 
-    # 2) password'ų formatas – bcrypt ($2b$...)
-    if any(not str(p).startswith("$2b$") for p in passwords):
-        st.error("❌ Bent vienas 'password' NĖRA bcrypt hash (turi prasidėti $2b$...).")
+    # 2) passwordai privalo būti bcrypt hash'ai ($2a/$2b/$2y), be tarpų
+    if any(not _is_bcrypt(p) for p in passwords):
+        st.error("❌ Bent vienas 'password' nėra bcrypt hash. Turi prasidėti $2a$, $2b$ arba $2y$.")
         st.stop()
 
-    # Suformuojam map'ą: username -> {name, hash, role}
+    # username -> {name, hash, role}
     usermap: Dict[str, Dict[str, str]] = {}
     for i, u in enumerate(users):
         usermap[u] = {
-            "name": names[i],
-            "hash": passwords[i],
-            "role": roles[i],
+            "name": str(names[i]).strip(),
+            "hash": str(passwords[i]).strip(),  # NUVALOM TARPUKUS
+            "role": str(roles[i]).strip(),
         }
 
-    # Auth nustatymai (čia cookie info – nenaudojame tiesiogiai, bet laikom vienoje vietoje)
     cookie_info = {
         "cookie_name": auth_conf.get("cookie_name", "sutartys_login"),
         "cookie_key": auth_conf.get("cookie_key", ""),
@@ -86,15 +88,12 @@ def read_secrets() -> Dict[str, Any]:
 
 SECRETS = read_secrets()
 
-
-# =========================
-# AUTH PAGAL BCRYPT + SESIJA
-# =========================
+# =============== AUTH (BCRYPT + SESIJA) ===============
 def verify(username: str, password: str) -> bool:
     user = SECRETS["users"].get(username)
     if not user:
         return False
-    hashed = user["hash"]
+    hashed = user["hash"].strip()
     try:
         return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
@@ -112,12 +111,9 @@ def do_login(username: str):
 def logout():
     for k in ("auth_user", "auth_name", "auth_role"):
         st.session_state.pop(k, None)
-    st.experimental_rerun()
+    _rerun()
 
-
-# =========================
-# LOGIN EKRANAS
-# =========================
+# =============== LOGIN EKRANAS ===============
 def login_view():
     st.markdown("<h2 style='text-align:center;'>Sutarčių likučių skydelis</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align:center;color:#9AA4B2;'>Prisijunk, kad tęstum</p>", unsafe_allow_html=True)
@@ -134,27 +130,28 @@ def login_view():
         if verify(username, password):
             do_login(username)
             st.success("Prisijungta. Kraunama...")
-            st.experimental_rerun()
+            _rerun()
         else:
             st.error("Neteisingas vartotojo vardas arba slaptažodis.")
             st.stop()
 
-    # Sustabdom, kad nepraslystų žemiau
+    # Sustabdom, kad niekas nepraslystų žemyn
     st.stop()
 
+# =============== PUSLAPIAI (PAVYZDINIAI KABLIUKAI) ===============
+def page_likuciai_ir_planai():
+    st.subheader("📊 Likučiai ir planai")
+    st.caption("Čia patalpink savo lenteles, filtrus, vizualizacijas.")
+    # TODO: įdėk savo logiką
+    st.info("Pavyzdinis blokas – įkelk savo skaičiavimus ir grafikus.")
 
-# =========================
-# PUSLAPIŲ LOGIKA
-# =========================
-def page_likuciai():
-    st.subheader("📊 Likučiai")
-    st.caption("Čia patalpink savo esamas lenteles, filtrus, vizualizacijas.")
-    # TODO: tavo likučių logika
-    st.info("Pavyzdinis blokas. Įdėk savo skaičiavimus ir grafikus.")
+def page_mom_wow_kiekiai():
+    st.subheader("📈 MoM WoW kiekiai")
+    # TODO: įdėk savo logiką
+    st.info("Pavyzdinis blokas – čia gali rodyti mėnesinius/ savaitinius palyginimus.")
 
 def page_ikelimas():
     st.subheader("📤 Įkėlimas")
-    st.caption("Failų įkėlimas / atnaujinimas.")
     uploaded = st.file_uploader("Įkelk Excel (*.xlsx)", type=["xlsx"])
     if uploaded:
         st.success(f"Failas gautas: {uploaded.name}")
@@ -163,7 +160,6 @@ def page_ikelimas():
 
 def page_nustatymai():
     st.subheader("⚙️ Nustatymai")
-    st.caption("Vartotojo nustatymai.")
     st.write("Vartotojas:", st.session_state.get("auth_user"))
     st.write("Vardas:", st.session_state.get("auth_name"))
     st.write("Rolė:", st.session_state.get("auth_role"))
@@ -174,13 +170,10 @@ def page_admin():
         st.warning("Neturi teisės pasiekti „Admin“ puslapio.")
         return
     st.success("Sveika, administratore!")
-    # TODO: čia daryk admin funkcijas (pvz., konfigūracijų peržiūra, ataskaitų ribojimai ir pan.)
-    st.info("Pavyzdinis admin blokas.")
+    # TODO: admin funkcijos
+    st.info("Pavyzdinis admin blokas – čia daryk konfigūraciją ir pan.")
 
-
-# =========================
-# VYKDYMAS
-# =========================
+# =============== VYKDYMAS ===============
 if not is_logged_in():
     login_view()
 
@@ -190,23 +183,20 @@ with st.sidebar:
     if st.button("Atsijungti"):
         logout()
     st.divider()
-    page = st.radio("Puslapiai", ["Likučiai", "Įkėlimas", "Nustatymai", "Admin"], index=0)
+    # Naudoju tavo meniu pavadinimus pagal screenshot
+    page = st.radio("Puslapiai", ["Likučiai ir planai", "MoM WoW kiekiai", "Įkėlimas", "Nustatymai", "Admin"], index=0)
 
 # Puslapių routing'as
-if page == "Likučiai":
-    page_likuciai()
+if page == "Likučiai ir planai":
+    page_likuciai_ir_planai()
+elif page == "MoM WoW kiekiai":
+    page_mom_wow_kiekiai()
 elif page == "Įkėlimas":
     page_ikelimas()
 elif page == "Nustatymai":
     page_nustatymai()
 elif page == "Admin":
     page_admin()
-st.set_page_config(
-    page_title="Sutarčių likučių skydelis",
-    page_icon="💼",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 with open("assets/neon.css", "r", encoding="utf-8") as f:
     st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
