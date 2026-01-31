@@ -9,7 +9,7 @@ if not st.session_state.get("logged_in", False):
 
 
 # pages/3_📈_MoM_WoW_kiekiai.py
-import streamlit as st
+
 import pandas as pd
 import numpy as np
 from datetime import date
