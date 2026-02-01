@@ -47,12 +47,12 @@ def safe_filename(name: str, max_len: int = 150) -> str:
     name = re.sub(r'[\\/:*?"<>|\r\n]+', "_", name).strip(" .")
     return (name or "export")[:max_len]
 
-# LT/EU sumų parse (kablelis, NBSP, €, U+2212)
+# LT/EU sumų parse – ta pati funkcija abiem pusėms
 def parse_eur_robust(series):
     if series is None:
         return pd.Series(dtype=float)
     s = series.astype(str)
-    s = s.str.replace('\u2212', '-', regex=False)  # „minusas“ U+2212 -> '-'
+    s = s.str.replace('\u2212', '-', regex=False)  # netikras „minusas“ U+2212 -> '-'
     s = s.str.replace('\u00A0', '', regex=False)   # NBSP lauk
     s = s.str.replace(' ', '', regex=False)        # tarpai lauk
     s = s.str.replace('€', '', regex=False)        # valiuta lauk
@@ -60,13 +60,10 @@ def parse_eur_robust(series):
     s = s.str.replace(r'[^0-9\.\-]', '', regex=True)
     return pd.to_numeric(s, errors='coerce')
 
-# Kreditinių suma – jei prireiks, iš F (6-ta kolona)
-def amount_from_F(df: pd.DataFrame) -> pd.Series:
-    if df is None or df.empty:
-        return pd.Series([], dtype=float)
-    if df.shape[1] >= 6:
-        return parse_eur_robust(df.iloc[:, 5]).fillna(0.0)
-    return pd.Series([0.0] * len(df), index=df.index, dtype=float)
+# Kreditinių prefiksas (tikras filtras)
+CREDIT_RE = re.compile(r'^(COP|KRE|AAA)', re.IGNORECASE)
+def is_credit_number(x: str) -> bool:
+    return isinstance(x, str) and bool(CREDIT_RE.match(x.strip()))
 
 # =================== Duomenys ===================
 inv = ensure_df(st.session_state.get("inv_norm"))
@@ -76,7 +73,7 @@ if inv is None:
     st.warning("Įkelk **išrašytas sąskaitas** (`inv_norm`) skiltyje **📥 Įkėlimas**.")
     st.stop()
 
-# Tipų sanitarija (abiems)
+# Tipų sanitarija (bendri laukai)
 for df in [inv, crn] if crn is not None else [inv]:
     if "Data" in df.columns:
         df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
@@ -92,16 +89,34 @@ for df in [inv, crn] if crn is not None else [inv]:
     else:
         df["SutartiesID"] = df["SutartiesID"].apply(lambda v: "" if pd.isna(v) else str(v)).str.strip()
 
-# ===== Sumos – VIENODA LOGIKA abiem pusėms =====
-# IŠRAŠYTI: Suma_su_PVM -> Suma
+# ===== IŠRAŠYTOS: Suma_su_PVM (ta pati logika kaip visada) =====
+if "Suma_su_PVM" not in inv.columns and "Suma" not in inv.columns:
+    st.error("Išrašytų faile nerasta nei `Suma_su_PVM`, nei `Suma`.")
+    st.stop()
+
 inv["Suma_su_PVM"] = parse_eur_robust(inv.get("Suma_su_PVM", inv.get("Suma", 0))).fillna(0.0)
 
-# KREDITINĖS: pirma lygiai taip pat -> jei vis dar 0/NaN – fallback į F
-if crn is not None:
-    crn["Suma_su_PVM"] = parse_eur_robust(crn.get("Suma_su_PVM", crn.get("Suma", 0))).fillna(0.0)
-    # Jei visa kolona nulinė arba nėra realių reikšmių, bandyk F
-    if (crn["Suma_su_PVM"].abs() < 1e-12).all():
-        crn["Suma_su_PVM"] = amount_from_F(crn)
+# ===== KREDITINĖS: TA PATI LOGIKA kaip išrašytoms + prefiksų filtras =====
+if crn is not None and not crn.empty:
+    crn = crn.copy()
+    # filtruojam TIK COP|KRE|AAA
+    if "Saskaitos_NR" not in crn.columns:
+        st.error("Kreditinių faile nėra stulpelio `Saskaitos_NR` (reikia, kad patikrintume COP/KRE/AAA).")
+        st.stop()
+    crn = crn.loc[crn["Saskaitos_NR"].astype(str).apply(is_credit_number)].copy()
+
+    if "Suma_su_PVM" not in crn.columns and "Suma" not in crn.columns:
+        st.error("Kreditinių faile nerasta nei `Suma_su_PVM`, nei `Suma` – šiame puslapyje naudok tą patį stulpelį kaip išrašytoms.")
+        st.stop()
+
+    crn["Suma_su_PVM"] = parse_eur_robust(crn.get("Suma_su_PVM", crn.get("Suma", 0)))
+    # BŪTINA: nė vienas neturi likti 0/NaN
+    bad = crn[crn["Suma_su_PVM"].isna() | (crn["Suma_su_PVM"] == 0)]
+    if not bad.empty:
+        st.error("⚠️ Rasta kreditinių su tuščia/0 `Suma_su_PVM`. Kadangi 'negali būti 0', patikrink šias eilutes šaltinyje (kolonos pavadinimą/formatą):")
+        show_bad = [c for c in ["Data","Saskaitos_NR","Klientas","Pastabos","Suma_su_PVM"] if c in bad.columns]
+        st.dataframe(bad[show_bad].head(50), use_container_width=True)
+        st.stop()
 
 # =================== Laikotarpio filtras ===================
 dmin, dmax = get_min_max_date(inv, crn)
@@ -129,7 +144,7 @@ if crn is not None:
 else:
     crn_f = None
 
-# =================== 1) IŠRAŠYTOS (kaip anksčiau) ===================
+# =================== 📄 Išrašytos sąskaitos ===================
 st.divider()
 st.subheader("📄 Išrašytos sąskaitos (SU PVM) – su planais ir likučiais")
 
@@ -158,10 +173,7 @@ plans["SutartiesPlanas"] = pd.to_numeric(plans["SutartiesPlanas"], errors="coerc
 st.markdown("### ✍️ Įvesk sutarčių planus (SU PVM)")
 plans = st.data_editor(
     plans.sort_values(["Klientas", "SutartiesID"]).reset_index(drop=True),
-    num_rows="dynamic",
-    hide_index=True,
-    use_container_width=True,
-    disabled=False,
+    num_rows="dynamic", hide_index=True, use_container_width=True,
     key="plans_editor",
     column_config={
         "Klientas": st.column_config.TextColumn(disabled=True),
@@ -173,33 +185,32 @@ plans["Klientas"] = plans["Klientas"].astype(str).str.strip()
 plans["SutartiesID"] = plans["SutartiesID"].astype(str).str.strip()
 st.session_state["plans"] = plans
 
-# Pagal nutylėjimą (be kreditinių įtakos):
+# Pagal nutylėjimą (Kreditinių neįtraukiame čia – tik rodome atskirai)
 out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
 out["Israsyta"] = out["Israsyta"].apply(floor2)
 out["Faktas"] = out["Israsyta"]
 out["Like"] = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
 
-# =================== 2) KREDITINĖS – be susiejimo (VIENODA LOGIKA kaip išrašytoms) ===================
+# =================== 💳 Kreditinės (be susiejimo) ===================
 st.divider()
-st.subheader("💳 Kreditinės (SU PVM) – be susiejimo (tokia pati sumų logika kaip išrašytoms)")
+st.subheader("💳 Kreditinės (SU PVM) – tik COP/KRE/AAA, ta pati sumų logika kaip išrašytoms")
 
 total_kred = 0.0
 if crn_f is None or crn_f.empty:
     st.info("Pasirinktame laikotarpyje **kreditinių nėra**.")
 else:
-    # Rodymui – nukerpam be apvalinimo
     crn_f["Suma_su_PVM"] = crn_f["Suma_su_PVM"].astype(float).fillna(0.0).apply(floor2)
     total_kred = float(crn_f["Suma_su_PVM"].sum())
-
-    cols_crn = [c for c in ["Data", "Saskaitos_NR", "Klientas", "Pastabos", "Suma_su_PVM", "Tipas"] if c in crn_f.columns]
+    cols_crn = [c for c in ["Data", "Saskaitos_NR", "Klientas", "Pastabos", "Suma_su_PVM"] if c in crn_f.columns]
     st.dataframe(
         crn_f[cols_crn].sort_values(["Data","Saskaitos_NR"]) if "Data" in cols_crn else crn_f[cols_crn],
         use_container_width=True
     )
 
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
 c1.metric("Kreditinių kiekis", "0" if crn_f is None else f"{len(crn_f)}")
 c2.metric("Kreditinių suma (SU PVM)", f"{total_kred:,.2f} €")
+c3.metric("Filtras", "COP | KRE | AAA")
 
 # =================== KPI ir Likučių lentelė (be kreditinių įtakos) ===================
 st.divider()
@@ -227,10 +238,7 @@ out["PctIsnaudota"] = np.where(den.isna(), 0.0, (out["Faktas"] / den) * 100.0)
 out["PctIsnaudota"] = out["PctIsnaudota"].clip(lower=0, upper=999)
 out["Progresas"] = out["PctIsnaudota"].apply(progress_bar)
 
-cols_order = [
-    "Klientas", "SutartiesID", "SutartiesPlanas",
-    "Israsyta", "Faktas", "Like", "PctIsnaudota", "Progresas"
-]
+cols_order = ["Klientas", "SutartiesID", "SutartiesPlanas", "Israsyta", "Faktas", "Like", "PctIsnaudota", "Progresas"]
 show_cols = [c for c in cols_order if c in out.columns]
 st.dataframe(out[show_cols].sort_values(["Klientas", "SutartiesID"]), use_container_width=True)
 
@@ -240,7 +248,7 @@ with pd.ExcelWriter(buf_all, engine="openpyxl") as xw:
     out[show_cols].to_excel(xw, sheet_name="Sutarciu_likuciai_SU_PVM", index=False)
     inv_f.to_excel(xw, sheet_name="Saskaitos_ISRASYTA_SU_PVM", index=False)
     if crn_f is not None and not crn_f.empty:
-        crn_cols = [c for c in ["Data","Saskaitos_NR","Klientas","Pastabos","Suma_su_PVM","Tipas"] if c in crn_f.columns]
+        crn_cols = [c for c in ["Data","Saskaitos_NR","Klientas","Pastabos","Suma_su_PVM"] if c in crn_f.columns]
         crn_f[crn_cols].to_excel(xw, sheet_name="Kreditines_SU_PVM", index=False)
 
 st.download_button(
