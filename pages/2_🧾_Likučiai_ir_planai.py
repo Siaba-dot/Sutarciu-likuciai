@@ -212,11 +212,13 @@ def _norm_key_cols(df: pd.DataFrame, keys=("Klientas","SutartiesID")) -> pd.Data
 
 def _fmt_target_row(row):
     """Gražus rodomas tikslas rankiniam pririšimui."""
-    key = str(row.get("Key_ref", "") or "").strip()
-    klientas = str(row.get("Klientas_inv", "") or "").strip()
-    sutartis = str(row.get("SutartiesID_inv", "") or "").strip()
-    if klientas or sutartis:
-        return f"{key}  |  {klientas}  |  {sutartis}"
+    key = str(row.get("Tikslas_VS_AAA", "") or "").strip()
+    klientas = str(row.get("Tikslas_Klientas", "") or "").strip()
+    sutartis = str(row.get("Tikslas_Sutartis", "") or "").strip()
+    nr = str(row.get("Saskaitos_NR_Tikslus", "") or "").strip()
+    parts = [p for p in [key or None, klientas or None, sutartis or None, nr or None] if p]
+    if parts:
+        return "  |  ".join(parts)
     return f"{key}  |  (nerasta išrašytose)"
 
 # =================== Įkelti duomenys ===================
@@ -296,6 +298,7 @@ inv_sum = (
     .rename("Israsyta")
     .reset_index()
 )
+inv_sum["Israsyta"] = pd.to_numeric(inv_sum["Israsyta"], errors="coerce").fillna(0.0)
 inv_sum = _norm_key_cols(inv_sum, ("Klientas","SutartiesID"))
 
 # REDAGUOJAMI PLANAI
@@ -353,67 +356,83 @@ c1, c2 = st.columns(2)
 c1.metric("Kreditinių kiekis", "0" if crn_f is None else f"{len(crn_f)}")
 c2.metric("Kreditinių suma (SU PVM)", f"{total_kred:,.2f} €")
 
-# =================== Kur įrašyti kiekvieną kreditinę (rankiniam pririšimui) ===================
+# =================== 📝 Kur įrašyti kreditinę sumą (rankinis pririšimas) – BE NaN rodymo ===================
 st.divider()
 st.subheader("📝 Kur įrašyti kreditinę sumą (rankinis pririšimas prie SF)")
+
+def _extract_from_number_for_map(nr: str) -> str:
+    if pd.isna(nr): return ""
+    s = str(nr).upper()
+    m = re.search(r'(VS[^\s]+)$', s) or re.search(r'(AAA[^\s]+)$', s)
+    return norm_alnum(m.group(1)) if m else norm_alnum(s)
 
 if crn_f is None or crn_f.empty:
     st.info("Kreditinių nėra – pririšimo sąrašo rodyti nereikia.")
 else:
-    # 1) Paruošiame raktų lentelę iš IŠRAŠYTŲ (pagal SF numerį)
-    inv_key_map = (
-        inv[["Data", "Saskaitos_NR", "Klientas", "SutartiesID"]]
+    # 1) Iš IŠRAŠYTŲ: raktas pagal SF numerį
+    inv_key = (
+        inv[["Data","Saskaitos_NR","Klientas","SutartiesID"]]
         .dropna(subset=["Saskaitos_NR"])
         .copy()
     )
-    inv_key_map["Key_inv_best"] = inv_key_map["Saskaitos_NR"].apply(extract_from_number)
-    inv_key_map = inv_key_map.rename(columns={"Klientas": "Klientas_inv", "SutartiesID": "SutartiesID_inv"})
-    inv_key_map = inv_key_map.sort_values(["Data", "Saskaitos_NR"])
-    inv_key_map = inv_key_map[inv_key_map["Key_inv_best"].astype(str).str.strip() != ""].copy()
+    inv_key["Key_inv_best"] = inv_key["Saskaitos_NR"].apply(_extract_from_number_for_map)
+    inv_key = inv_key.rename(columns={"Klientas":"Tikslas_Klientas","SutartiesID":"Tikslas_Sutartis"})
+    inv_key = inv_key.sort_values(["Data","Saskaitos_NR"])
+    inv_key = inv_key[inv_key["Key_inv_best"].astype(str).str.strip() != ""]
     inv_key_unique = (
-        inv_key_map.drop_duplicates(subset=["Key_inv_best"], keep="last")
-                   [["Key_inv_best", "Klientas_inv", "SutartiesID_inv"]]
+        inv_key.drop_duplicates(subset=["Key_inv_best"], keep="last")
+               [["Key_inv_best","Tikslas_Klientas","Tikslas_Sutartis"]]
     )
-    # Norint rodyti tikslų SF numerį:
+    # Tikslus SF nr.
     inv_nr_map = (
         inv[["Data","Saskaitos_NR"]].copy()
+          .assign(Key_inv_best=inv["Saskaitos_NR"].apply(_extract_from_number_for_map))
+          .sort_values(["Data","Saskaitos_NR"])
+          .drop_duplicates(subset=["Key_inv_best"], keep="last")
     )
-    inv_nr_map["Key_inv_best"] = inv_nr_map["Saskaitos_NR"].apply(extract_from_number)
-    inv_nr_map = inv_nr_map.sort_values(["Data","Saskaitos_NR"]).drop_duplicates(subset=["Key_inv_best"], keep="last")
 
-    # 2) Iš KREDITINIŲ: nuoroda į išrašytą sąskaitą iš „Pastabų“
+    # 2) Iš KREDITINIŲ: iš Pastabų ištraukiam nuorodą į SF
     mapping = crn_f.copy()
-    mapping["Key_ref"] = mapping.get("Pastabos", pd.Series(index=mapping.index, dtype=str)).apply(extract_last_from_notes)
+    mapping["Tikslas_VS_AAA"] = mapping.get("Pastabos", pd.Series(index=mapping.index, dtype=str)).apply(extract_last_from_notes)
 
-    # 3) Sujungiame info apie tikslinę SF (jei rasta) ir pridedame tikslų SF nr.
-    mapping = mapping.merge(inv_key_unique, left_on="Key_ref", right_on="Key_inv_best", how="left")
-    mapping = mapping.merge(inv_nr_map[["Key_inv_best","Saskaitos_NR"]], on="Key_inv_best", how="left", suffixes=("", "_Tikslus"))
+    # 3) Jungiam prie išrašytų raktų
+    mapping = mapping.merge(
+        inv_key_unique, left_on="Tikslas_VS_AAA", right_on="Key_inv_best", how="left"
+    )
+    mapping = mapping.merge(
+        inv_nr_map[["Key_inv_best","Saskaitos_NR"]],
+        on="Key_inv_best", how="left", suffixes=("", "_Tikslus")
+    )
 
-    # 4) Gražus 'Pririšti_prie'
+    # 4) Sutvarkom rodymą be NaN
+    mapping["Tikslus_SF_NR"]   = mapping["Saskaitos_NR"].fillna("Nerasta")
+    mapping["Tikslas_Klientas"] = mapping["Tikslas_Klientas"].fillna("Nerasta")
+    mapping["Tikslas_Sutartis"] = mapping["Tikslas_Sutartis"].fillna("Nerasta")
+
+    # 5) Aiškus „Pririšti_prie“
     mapping["Pririšti_prie"] = mapping.apply(_fmt_target_row, axis=1)
-    if "Saskaitos_NR_Tikslus" in mapping.columns:
-        mapping["Pririšti_prie"] = np.where(
-            mapping["Saskaitos_NR_Tikslus"].notna() & (mapping["Saskaitos_NR_Tikslus"].astype(str)!=""),
-            mapping["Pririšti_prie"] + "  |  " + mapping["Saskaitos_NR_Tikslus"].astype(str),
-            mapping["Pririšti_prie"]
-        )
 
-    # 5) Rodymui – kompaktiški stulpeliai
-    cols_map = []
-    for c in ["Data","Saskaitos_NR","Klientas","Suma_su_PVM","Pastabos","Pririšti_prie"]:
-        if c in mapping.columns:
-            cols_map.append(c)
+    # 6) Rodom
+    cols_map = [c for c in [
+        "Data","Saskaitos_NR","Klientas","Suma_su_PVM","Pastabos",
+        "Tikslas_VS_AAA","Tikslus_SF_NR","Tikslas_Klientas","Tikslas_Sutartis","Pririšti_prie"
+    ] if c in mapping.columns]
 
     st.dataframe(
         mapping[cols_map].sort_values(["Data","Saskaitos_NR"]) if "Data" in cols_map else mapping[cols_map],
         use_container_width=True
     )
 
-    # 6) Eksportas į Excel
+    # 7) Diagnostika
+    total_crn = len(mapping)
+    no_ref    = (mapping["Tikslas_VS_AAA"].astype(str).str.strip() == "").sum()
+    matched   = (mapping["Tikslus_SF_NR"] != "Nerasta").sum()
+    st.caption(f"Diag: kreditinių={total_crn}, be nuorodos Pastabose={no_ref}, sėkmingai pririšta (rastas tikslus SF nr.)={matched}.")
+
+    # 8) Eksportas į Excel – instrukcinis sąrašas
     buf_map = BytesIO()
     with pd.ExcelWriter(buf_map, engine="openpyxl") as xw:
-        mapping_out = mapping[cols_map].copy()
-        mapping_out.to_excel(xw, sheet_name="Kur_irasyti_kreditine", index=False)
+        mapping[cols_map].to_excel(xw, sheet_name="Kur_irasyti_kreditine", index=False)
     st.download_button(
         "⬇️ Atsisiųsti pririšimo sąrašą (.xlsx)",
         data=buf_map.getvalue(),
@@ -421,9 +440,7 @@ else:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    st.caption("Stulpelis **„Pririšti_prie“**: Pastabose rasta VS/AAA nuoroda + (jei rasta) Klientas ir SutartiesID bei tikslus SF numeris.")
-
-# =================== Automatinis pririšimas (jei Pastabose raktas atitinka) ir Likutis ===================
+# =================== Automatinis pririšimas ir likučiai (jei įmanoma) ===================
 st.divider()
 st.subheader("🔗 Automatinis pririšimas ir likučiai (jei įmanoma)")
 
@@ -445,10 +462,10 @@ inv_key_unique = (
 if crn_f is None or crn_f.empty:
     out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
     out = _norm_key_cols(out, ("Klientas","SutartiesID"))
-    out["Israsyta"] = out["Israsyta"].apply(floor2)
+    out["Israsyta"]  = pd.to_numeric(out["Israsyta"],  errors="coerce").fillna(0.0)
     out["Kredituota"] = 0.0
-    out["Faktas"] = out["Israsyta"]
-    out["Like"] = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
+    out["Faktas"]    = (out["Israsyta"] - out["Kredituota"]).apply(floor2)
+    out["Like"]      = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
 else:
     work = crn_f.copy()
     work["Key_ref"] = work.get("Pastabos", pd.Series(index=work.index, dtype=str)).apply(extract_last_from_notes)
@@ -476,6 +493,7 @@ else:
 
     out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
     out = _norm_key_cols(out, ("Klientas","SutartiesID"))
+    out["Israsyta"]  = pd.to_numeric(out["Israsyta"],  errors="coerce").fillna(0.0)
 
     out = out.merge(crn_sum, how="left", on=["Klientas","SutartiesID"])
     out["Kredituota"] = pd.to_numeric(out["Kredituota"], errors="coerce").fillna(0.0)
