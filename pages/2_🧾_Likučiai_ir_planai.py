@@ -8,15 +8,43 @@ import re
 
 # =================== Puslapio nustatymas ===================
 st.set_page_config(layout="wide")
-st.markdown("## 🧾 Išrašytos ir kreditinės sąskaitos (SU PVM) – planai ir likučiai")
 
-# Kompaktesnis išdėstymas (be HTML entitetų)
+# Kompaktesnis išdėstymas + prisitaikanti antraštė (visada tilps)
 st.markdown("""
 <style>
-section.main > div { padding-top: 0rem; }
+/* Pagrindinis konteineris */
 .block-container { padding-top: 0.5rem; padding-bottom: 0.75rem; }
+
+/* Pritaikoma antraštė – automatinis mažinimas ir laužymas */
+.page-title{
+  margin: .2rem 0 .6rem 0;
+  font-weight: 600;
+  line-height: 1.25;
+  font-size: clamp(1.0rem, 1.6vw + 0.6rem, 1.55rem);
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.page-title .emoji { font-size: .95em; vertical-align: -0.05em; }
+
+/* Mažesni ekranai – dar kompaktiškiau */
+@media (max-width: 1024px){
+  .block-container { max-width: 100%; }
+  .page-title { font-size: clamp(0.95rem, 2.4vw + 0.4rem, 1.35rem); }
+}
+@media (max-width: 768px){
+  .page-title { font-size: clamp(0.9rem, 3.2vw + 0.3rem, 1.2rem); }
+}
+
+/* Papildomas viršutinis tarpas mažinimas */
+section.main > div { padding-top: 0rem; }
 </style>
 """, unsafe_allow_html=True)
+
+# Antraštė (vietoj st.header ar "## ...")
+TITLE = "🧾 Išrašytos ir kreditinės sąskaitos (SU PVM) – planai ir likučiai"
+TITLE_HTML = TITLE.replace("🧾", '<span class="emoji">🧾</span>')
+st.markdown(f'<div class="page-title">{TITLE_HTML}</div>', unsafe_allow_html=True)
 
 # =================== Pagalbinės ===================
 def floor2(x):
