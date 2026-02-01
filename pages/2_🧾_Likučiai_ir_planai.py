@@ -71,70 +71,78 @@ def amount_from_F(df: pd.DataFrame) -> pd.Series:
         return parse_eur_robust(df.iloc[:, 5]).fillna(0.0)
     return pd.Series([0.0] * len(df), index=df.index, dtype=float)
 
-# --- EUR stulpelio aptikimas pagal PAVADINIMĄ (header) ---
+# ---------- NAUJA: normalizuojame antraštes (HEADER) be duomenų ardymo ----------
+def normalize_headers(df: pd.DataFrame):
+    """
+    Grąžina:
+      - cols_orig: originalių stulpelių pavadinimų sąrašą
+      - cols_norm: normalizuotų (strip + upper) pavadinimų sąrašą (ta pati tvarka)
+    Nepakeičia df.columns – dirbam tik su „vaizdu“, kad neardytume kitų dalių.
+    """
+    cols_orig = list(df.columns)
+    cols_norm = [str(c).strip().upper() for c in cols_orig]
+    return cols_orig, cols_norm
+
+# --- EUR stulpelio aptikimas pagal PAVADINIMĄ (header) su normalizacija ---
 def detect_currency_col_idx_headers(df: pd.DataFrame, currency: str = "EUR"):
-    """Grąžina stulpelio indeksą, jei tarp df.columns yra 'EUR'. Kitaip None."""
+    cols_orig, cols_norm = normalize_headers(df)
     try:
-        cols = list(df.columns)
-        eur_idx = cols.index(currency)
+        eur_idx = cols_norm.index(currency.upper().strip())
         return eur_idx
     except ValueError:
         return None
 
-# --- EUR stulpelio aptikimas pagal TURINĮ (langelių reikšmes) ---
+# --- EUR stulpelio aptikimas pagal TURINĮ (langelių reikšmes) – case-insensitive ---
 def detect_currency_col_idx_content(df: pd.DataFrame, currency: str = "EUR"):
-    """
-    Grąžina tą stulpelio indeksą, kuriame daugiausia langelių lygu 'EUR' (kaip reikšmė turinyje).
-    Jei nė viename stulpelyje nėra 'EUR' – grąžina None.
-    """
     best_idx, best_count = None, -1
+    target = currency.upper().strip()
     for i, c in enumerate(df.columns):
-        col = df[c].astype(str).str.strip()
-        cnt = (col == currency).sum()
+        col = df[c].astype(str).str.strip().str.upper()
+        cnt = (col == target).sum()
         if cnt > best_count:
             best_idx, best_count = i, cnt
     return best_idx if best_count > 0 else None
 
-# --- Tavo prašyta logika: SUMOS = stulpelis prieš 'EUR' ---
+# --- Tavo logika (robustiška): SUMOS = stulpelis prieš 'EUR' (header-based) ---
 def credit_amounts_by_header_logic(df: pd.DataFrame) -> pd.Series:
     """
-    1) 'EUR' kaip antraštė: imame stulpelį prieš 'EUR'
-    2) Jei nerandam – kaimynystės patikra (cols[i+1] == 'EUR' ir esamas skaitinis)
-    3) Jei nepavyko – grąžinam nulius (tolesni fallback'ai vykdomi kitur)
+    1) 'EUR' kaip ANTRAŠTĖ: imame stulpelį prieš 'EUR' (naudojant normalizuotas antraštes).
+    2) Jei nerandam – kaimynystė: ieškom tokio i, kad next header == 'EUR', o esamą bandome parse'inti;
+       priimam, jei |sum| > 0 (nebebūtina, kad dtype būtų numeric).
+    3) Jei nepavyko – grąžinam nulius (tolesni fallback'ai vykdomi compute_credit_amounts()).
     """
     if df is None or df.empty:
         return pd.Series([], dtype=float)
 
-    cols = list(df.columns)
-    amount_col = None
+    cols_orig, cols_norm = normalize_headers(df)
+    amount_idx = None
 
-    # 1) Tikrinam, ar tarp antraščių yra 'EUR'
+    # 1) Tiesioginis 'EUR' antraštėje
     eur_idx = detect_currency_col_idx_headers(df, "EUR")
     if eur_idx is not None and eur_idx - 1 >= 0:
-        amount_col = cols[eur_idx - 1]
-    else:
-        # 2) Kaimynystė (jei 'EUR' ne kaip antraštė)
-        for i in range(len(cols) - 1):
-            if cols[i + 1] == "EUR" and pd.api.types.is_numeric_dtype(df[cols[i]]):
-                amount_col = cols[i]
-                break
+        amount_idx = eur_idx - 1
 
-    if amount_col is None:
+    # 2) Kaimynystės skenavimas, jeigu neradom
+    if amount_idx is None:
+        for i in range(len(cols_norm) - 1):
+            if cols_norm[i + 1] == "EUR":
+                # Bandome parse'inti – priimam, jei yra reali suma
+                trial = parse_eur_robust(df.iloc[:, i]).fillna(0.0)
+                if trial.abs().sum() > 0:
+                    amount_idx = i
+                    break
+
+    if amount_idx is None:
         return pd.Series(0.0, index=df.index, dtype=float)
-
-    # Konvertuojam į skaičių; jeigu stulpelis jau numerinis – tiesiog to_numeric
-    if pd.api.types.is_numeric_dtype(df[amount_col]):
-        return pd.to_numeric(df[amount_col], errors="coerce").fillna(0.0)
-    else:
-        return parse_eur_robust(df[amount_col]).fillna(0.0)
+    return parse_eur_robust(df.iloc[:, amount_idx]).fillna(0.0)
 
 # --- „Universalus“ sumų nustatymas kreditinėms, nekeičiat išrašytų logikos ---
 def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
     """
     Prioritetų seka:
-      (A) Jei jau yra pavadinti stulpeliai – 'Suma_su_PVM' arba 'Suma'
-      (B) Tavo logika: 'EUR' kaip antraštė ir imame stulpelį prieš jį
-      (C) 'EUR' kaip TURINYS (langeliuose), imame stulpelį prieš jį
+      (A) Jei jau yra pavadinti stulpeliai – 'Suma_su_PVM' arba 'Suma' arba 'SUM SU PVM' arba 'SUM'
+      (B) Tavo logika: 'EUR' kaip antraštė ir imame stulpelį prieš jį (case-insensitive)
+      (C) 'EUR' kaip TURINYS (langeliuose), imame stulpelį prieš jį (case-insensitive)
       (D) 6-ta kolona (F)
       (E) Visiškai fallback – nulis
     """
@@ -148,19 +156,19 @@ def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
             if s.abs().sum() > 0:
                 return s
 
-    # (B) – tavo „stulpelis prieš EUR (header)“ logika
+    # (B) – tavo „stulpelis prieš EUR (header)“ logika (normalizuota)
     s = credit_amounts_by_header_logic(df)
     if s.abs().sum() > 0:
         return s
 
-    # (C) – EUR kaip turinys (ne antraštė)
+    # (C) – EUR kaip turinys (ne antraštė), case-insensitive
     eur_idx = detect_currency_col_idx_content(df, "EUR")
     if eur_idx is not None and eur_idx - 1 >= 0:
         s = parse_eur_robust(df.iloc[:, eur_idx - 1]).fillna(0.0)
         if s.abs().sum() > 0:
             return s
 
-    # (D) – 6-ta kolona
+    # (D) – 6-ta kolona (F)
     s = amount_from_F(df)
     if s.abs().sum() > 0:
         return s
@@ -254,7 +262,7 @@ if crn_raw is not None:
         if "Saskaitos_NR" in crn.columns:
             crn = crn.loc[crn["Saskaitos_NR"].astype(str).apply(is_credit_number)].copy()
 
-    # --- ČIA SVARBIAUSIA DALIS: sumas nustatome pagal 'EUR' vietą ---
+    # --- SUMOS: robusti „prieš EUR“ logika + fallback'ai ---
     crn["Suma_su_PVM"] = compute_credit_amounts(crn).astype(float).fillna(0.0)
 
     # Apsauga: kreditinės „SutartiesID“ niekada nenaudojamas pririšimui
@@ -566,7 +574,7 @@ with pd.ExcelWriter(buf_all, engine="openpyxl") as xw:
     out[show_cols].to_excel(xw, sheet_name="Sutarciu_likuciai_SU_PVM", index=False)
     inv_f.to_excel(xw, sheet_name="Saskaitos_ISRASYTA_SU_PVM", index=False)
     if crn_f is not None and not crn_f.empty:
-        cols_crn = [c for c in ["Data", "Saskaitos_NR", "Klientas", "Pastabos", "Suma_su_PVM", "Tipas"] if c in crn_f.columns]
+        cols_crn = [c for c in ["Data","Saskaitos_NR","Klientas","Pastabos","Suma_su_PVM","Tipas"] if c in crn_f.columns]
         crn_f[cols_crn].to_excel(xw, sheet_name="Kreditines_SU_PVM", index=False)
 
 st.download_button(
