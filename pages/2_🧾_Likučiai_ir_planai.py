@@ -11,6 +11,14 @@ import re
 st.set_page_config(layout="wide")
 st.markdown("## 🧾 Likučiai ir planai (sumos SU PVM)")
 
+# Kompaktesnis išdėstymas (mažiau viršutinių tarpų)
+st.markdown("""
+<style>
+section.main > div { padding-top: 0rem; }
+.block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+</style>
+""", unsafe_allow_html=True)
+
 # =================== Pagalbinės ===================
 def floor2(x):
     """Nukerpa iki 2 skaičių po kablelio (be apvalinimo)."""
@@ -48,42 +56,41 @@ def safe_filename(name: str, max_len: int = 150) -> str:
     return (name or "export")[:max_len]
 
 # =================== Kreditinių atpažinimas ===================
-# (Naudojama tik tam, kad kredito sąrašas nepriimtų šiukšlių)
-CREDIT_PREFIXES = ("COP", "KRE", "AAA")  # AAA gali būti ir kredito numerio prefiksas
+# Kreditinių numerių prefiksai (naudojam tik tam, kad atmest šiukšles)
+CREDIT_PREFIXES = ("COP", "KRE", "AAA")  # AAA taip pat gali būti kreditinės prefiksas
 CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\s\-]*', re.IGNORECASE)
 
 def is_credit_number(x: str) -> bool:
-    """Ar tekstas atrodo kaip kreditinės numeris pagal suderintus prefiksus?"""
+    """Ar tekstas atrodo kaip kreditinės numeris pagal prefiksus?"""
     return isinstance(x, str) and bool(CREDIT_RE.match(x.strip()))
 
-# =================== Tavo TAISYKLĖ: VS/AAA ištrauka ===================
+# =================== TAVO TAISYKLĖ: VS/AAA ištrauka ===================
 def extract_last_vs_aaa(text: str) -> str:
     """
-    Grąžina raktą iš Pastabų arba sąskaitos numerio, pagal taisyklę:
-    - Jei yra 'VS' arba 'AAA' – imame paskutinį tokį pasirodymą,
-      paimame nuo jo iki eilutės pabaigos,
-      tada paliekame tik A-Z ir 0-9 (t.y., viską išvalome į raktą).
-    - Jei nerado – grąžina tuščią.
+    BRUTALI TAISYKLĖ:
+      - Jei tekste yra 'VS' arba 'AAA' – imame *paskutinį* pasirodymą,
+        paimame nuo jo iki eilutės pabaigos ir išvalome iki A-Z0-9 (kiti simboliai pašalinami).
+      - Jei nėra – grąžina tuščią.
     Pvz.:
-      "koreguojame VS – 1234"      -> "VS1234"
-      "VS001 VS002 VS003"          -> "VS003"
-      "VS12-34-567##%"             -> "VS1234567"
-      "xxx AAA-0009 yyy"           -> "AAA0009"
-      "be VS ir AAA"               -> ""
+      'koreguojame VS – 1234'   -> 'VS1234'
+      'VS001 VS002 VS003'       -> 'VS003'
+      'VS12-34-567##%'          -> 'VS1234567'
+      'xxx AAA-0009 yyy'        -> 'AAA0009'
+      'be VS ir AAA'            -> ''
     """
     if pd.isna(text):
         return ""
     s = str(text).upper()
 
-    # Susirandam visas VS/AAA pozicijas
+    # Surandam VISAS 'VS' arba 'AAA' pozicijas
     matches = list(re.finditer(r'(VS|AAA)', s))
     if not matches:
         return ""
 
-    # Imame paskutinės (pagal taisyklę) poziciją
+    # Paskutinio sutapimo pradžia
     start = matches[-1].start()
 
-    # Paimam nuo start iki eilutės pabaigos ir išvalom
+    # Paimam nuo start iki pabaigos ir išvalom
     tail = s[start:]
     key = re.sub(r'[^A-Z0-9]', '', tail)  # tik A-Z0-9
 
@@ -99,7 +106,7 @@ def normalize_credit_df_if_needed(crn_raw: pd.DataFrame | None) -> pd.DataFrame 
         return crn_raw
 
     cols = [c.lower() for c in crn_raw.columns.astype(str).tolist()]
-    # Jei panašu, kad jau normalizuota (turi bent Data ir Saskaitos_NR), paliekam kaip yra
+    # Jei jau normalizuota (turi Data + Saskaitos_NR) – paliekam
     if set(["data", "saskaitos_nr"]).issubset(set(cols)):
         d = crn_raw.copy()
         d["Data"] = pd.to_datetime(d["Data"], errors="coerce")
@@ -120,7 +127,7 @@ def normalize_credit_df_if_needed(crn_raw: pd.DataFrame | None) -> pd.DataFrame 
         df["Suma_su_PVM"] = pd.to_numeric(df["Suma_su_PVM"], errors="coerce")
         df = df.dropna(how="all")
 
-        # Tikros kreditinės pagal prefiksus
+        # Filtruojam tikras kreditines pagal prefiksus
         mask_crn = df["Kreditines_NR"].astype(str).apply(is_credit_number)
         df = df.loc[mask_crn].copy()
 
@@ -130,7 +137,6 @@ def normalize_credit_df_if_needed(crn_raw: pd.DataFrame | None) -> pd.DataFrame 
         df["Tipas"] = "Kreditinė"
         return df.dropna(subset=["Data"]).reset_index(drop=True)
     except Exception:
-        # Nepavyko – grąžinam originalą
         return crn_raw
 
 # =================== Duomenys iš sesijos ===================
@@ -183,8 +189,7 @@ mask_inv = inv["Data"].dt.date.between(nuo, iki)
 inv_f = inv.loc[mask_inv].copy()
 
 # =================== Raktas susiejimui (iš VISŲ invoisų) ===================
-# Išrašytoms sąskaitoms formuojame raktą iš jų numerio:
-# - paimame paskutinį 'VS' arba 'AAA' fragmentą ir jo „uodegą“
+# Išrašytoms sąskaitoms suformuojam JoinKey pagal tavo taisyklę (paskutinis VS/AAA ir uodega)
 inv_key = (
     inv[["Saskaitos_NR", "Klientas", "SutartiesID"]]
     .dropna(subset=["Saskaitos_NR"])
@@ -192,27 +197,42 @@ inv_key = (
 )
 inv_key["Saskaitos_NR"] = inv_key["Saskaitos_NR"].astype(str).str.strip().str.upper()
 inv_key["JoinKey"] = inv_key["Saskaitos_NR"].apply(extract_last_vs_aaa)
-
-# jei JoinKey tuščias, jungti nebepavyks – paliekam tuščius (tokie vis tiek nesusijungs)
 inv_key = inv_key.rename(columns={
     "Klientas": "Klientas_inv",
     "SutartiesID": "SutartiesID_inv"
 })
 
+# SUSPAUDŽIAM iki unikalaus JoinKey -> fan-out FIX
+inv_key = inv_key[inv_key["JoinKey"].astype(str).str.strip() != ""].copy()
+inv_key_unique = (
+    inv_key
+    .sort_values(["Saskaitos_NR"])  # jei nori – pakeisk į ["Data"]
+    .drop_duplicates(subset=["JoinKey"], keep="last")
+    [["JoinKey", "Klientas_inv", "SutartiesID_inv"]]
+)
+
 # =================== Kreditinių susiejimas per išrašytą sąskaitą (VS/AAA) ===================
 if crn is not None:
     crn_work = crn.copy()
 
-    # Tikros kreditinės pagal prefiksus (COP/KRE/AAA)
+    # Filtruojam tikras kreditines pagal prefiksus (jei yra numeris)
     if "Saskaitos_NR" in crn_work.columns:
         crn_work = crn_work[crn_work["Saskaitos_NR"].astype(str).apply(is_credit_number)].copy()
 
-    # Kreditinėms raktą VISADA gauname iš Pastabų pagal taisyklę: paskutinis VS/AAA ir jo uodega
+    # (Pasirinktinai) dedupuojam kreditines pagal pačios kreditinės numerį – dėl švaros
+    if "Saskaitos_NR" in crn_work.columns:
+        crn_work = (
+            crn_work
+            .sort_values(["Data","Saskaitos_NR"])
+            .drop_duplicates(subset=["Saskaitos_NR"], keep="last")
+        )
+
+    # Kreditinėms JoinKey VISADA iš Pastabų: paskutinė VS/AAA + uodega
     crn_work["JoinKey"] = crn_work.get("Pastabos", pd.Series(index=crn_work.index, dtype=str)).apply(extract_last_vs_aaa)
 
-    # MERGE tik per JoinKey
+    # MERGE tik per JoinKey su unikaliu inv raktu
     crn_work = crn_work.merge(
-        inv_key[["JoinKey", "Klientas_inv", "SutartiesID_inv"]],
+        inv_key_unique,
         on="JoinKey",
         how="left",
     )
@@ -241,7 +261,7 @@ inv_sum = (
     .reset_index()
 )
 
-# Kreditinių suma – į „Faktą“ eis su minusu; agreguojam TIK susietas su sutartimi (iš invoiso)
+# Kreditinių suma – į „Faktą“ eis su minusu; agreguojam TIK tas, kurios turi susietą sutartį
 if crn_f is not None and not crn_f.empty:
     crn_f["Kredituota_signed"] = -crn_f["Suma_su_PVM"].abs()
 
@@ -398,23 +418,6 @@ if sel_client and sel_contract:
         c6.metric("% išnaudota", f"{0.0 if planas == 0 else floor2((faktas / planas) * 100):,.2f}%")
 
         st.dataframe(one[show_cols], use_container_width=True)
-
-        # ======= Eksportas – tik ši sutartis =======
-        sheet = safe_sheet_name(sel_contract, fallback="Sutartis")
-        fname_client = safe_filename(sel_client)
-        fname_contract = safe_filename(sel_contract)
-        nuo_str, iki_str = str(nuo), str(iki)
-
-        buf_one = BytesIO()
-        with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
-            one.to_excel(xw, sheet_name=sheet, index=False)
-
-        st.download_button(
-            "⬇️ Atsisiųsti šios sutarties išklotinę (.xlsx)",
-            data=buf_one.getvalue(),
-            file_name=f"{fname_client}__{fname_contract}__{nuo_str}_{iki_str}__likutis_SU_PVM.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
 else:
     st.info("Pasirink **Klientą** ir **Sutartį**.")
 
@@ -438,7 +441,7 @@ if crn_f is not None and not crn_f.empty:
                 missing_map[show_diag].sort_values("Data"),
                 use_container_width=True
             )
-            st.info("Patarimas: Pastabose turi būti bent viena VS arba AAA seka; jei kelios – naudojama paskutinė.")
+            st.info("Pastabose turi būti bent viena VS arba AAA seka; jei kelios – naudojama paskutinė.")
 
 # =================== Eksportas – visa suvestinė (pagal laikotarpį) ===================
 buf = BytesIO()
@@ -446,7 +449,16 @@ with pd.ExcelWriter(buf, engine="openpyxl") as xw:
     out.to_excel(xw, sheet_name="Sutarciu_likuciai_SU_PVM", index=False)
     inv_f.to_excel(xw, sheet_name="Saskaitos_ISRASYTA_SU_PVM", index=False)
     if crn_f is not None and not crn_f.empty:
-        crn_f.to_excel(xw, sheet_name="Kreditines_SU_PVM", index=False)
+        # Eksportuojam kreditines (dedupuotos pagal kreditinės numerį)
+        export_crn = crn_f.copy()
+        if "Saskaitos_NR" in export_crn.columns:
+            export_crn = (
+                export_crn
+                .sort_values(["Data","Saskaitos_NR"])
+                .drop_duplicates(subset=["Saskaitos_NR"], keep="last")
+            )
+        export_crn.to_excel(xw, sheet_name="Kreditines_SU_PVM", index=False)
+
         # Papildomai – neužsirišusios kreditinės
         missing_map = crn_f[
             (crn_f["SutartiesID_final"].astype(str).str.strip() == "") |
