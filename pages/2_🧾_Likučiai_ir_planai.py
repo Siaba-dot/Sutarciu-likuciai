@@ -7,6 +7,8 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import date
 import re
 
+# Rekomenduojama: platus išdėstymas
+st.set_page_config(layout="wide")
 st.markdown("## 🧾 Likučiai ir planai (sumos SU PVM)")
 
 # ========= Pagalbinės =========
@@ -46,6 +48,7 @@ def safe_filename(name: str, max_len: int = 150) -> str:
     return (name or "export")[:max_len]
 
 # ========= Kreditinių numerių atpažinimas =========
+# Pagal tavo taisyklę kreditinės gali prasidėti COP / KRE / AAA
 CREDIT_PREFIXES = ("COP", "KRE", "AAA")
 CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\s\-]*', re.IGNORECASE)
 
@@ -110,6 +113,7 @@ def normalize_credit_df_if_needed(crn_raw: pd.DataFrame | None) -> pd.DataFrame 
 
         df = df.rename(columns={"Kreditines_NR": "Saskaitos_NR"})
         df["Saskaitos_NR"] = df["Saskaitos_NR"].astype(str).str.strip().str.upper()
+        df["Klientas"] = df["Klientas"].astype(str).str.strip()
         df["Tipas"] = "Kreditinė"
         return df.dropna(subset=["Data"]).reset_index(drop=True)
     except Exception:
@@ -253,7 +257,7 @@ fact = pd.merge(
     on=["Klientas", "SutartiesID"],
 ).fillna({"Kredituota_signed": 0.0})
 
-# Faktas = Išrašyta + (neigiamas kreditas) -> t.y. ISRAṠYTA - KREDITUOTA
+# Faktas = Išrašyta + (neigiamas kreditas) -> t.y. IŠRAŠYTA - KREDITUOTA
 fact["Faktas"] = fact["Israsyta"] + fact["Kredituota_signed"]
 
 # ========= REDAGUOJAMI PLANAI =========
@@ -431,7 +435,9 @@ with pd.ExcelWriter(buf, engine="openpyxl") as xw:
             missing_map.to_excel(xw, sheet_name="CRN_neuzrisa", index=False)
 
 st.download_button(
-
-
-
+    "⬇️ Eksportuoti suvestinę (.xlsx)",
+    data=buf.getvalue(),
+    file_name=f"sutarciu_likuciai_SU_PVM__{nuo}_{iki}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
