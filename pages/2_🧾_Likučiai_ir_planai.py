@@ -20,7 +20,6 @@ section.main > div { padding-top: 0rem; }
 
 # =================== Pagalbinės ===================
 def floor2(x):
-    """Nukerpa iki 2 skaičių po kablelio (be apvalinimo)."""
     try:
         return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
     except Exception:
@@ -47,20 +46,18 @@ def safe_filename(name: str, max_len: int = 150) -> str:
     name = re.sub(r'[\\/:*?"<>|\r\n]+', "_", name).strip(" .")
     return (name or "export")[:max_len]
 
-# LT/EU sumų parse (kablelis, NBSP, €, U+2212)
 def parse_eur_robust(series):
     if series is None:
         return pd.Series(dtype=float)
     s = series.astype(str)
-    s = s.str.replace('\u2212', '-', regex=False)  # minus U+2212 -> '-'
-    s = s.str.replace('\u00A0', '', regex=False)   # NBSP lauk
-    s = s.str.replace(' ', '', regex=False)        # tarpai lauk
-    s = s.str.replace('€', '', regex=False)        # valiuta lauk
-    s = s.str.replace(',', '.', regex=False)       # kablelis -> taškas
+    s = s.str.replace('\u2212', '-', regex=False)
+    s = s.str.replace('\u00A0', '', regex=False)
+    s = s.str.replace(' ', '', regex=False)
+    s = s.str.replace('€', '', regex=False)
+    s = s.str.replace(',', '.', regex=False)
     s = s.str.replace(r'[^0-9\.\-]', '', regex=True)
     return pd.to_numeric(s, errors='coerce')
 
-# 6-ta kolona (F) – kaip atsarginis variantas
 def amount_from_F(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series([], dtype=float)
@@ -68,13 +65,11 @@ def amount_from_F(df: pd.DataFrame) -> pd.Series:
         return parse_eur_robust(df.iloc[:, 5]).fillna(0.0)
     return pd.Series([0.0] * len(df), index=df.index, dtype=float)
 
-# ---------- Normalizuotos antraštės (nekeičiant df.columns) ----------
 def normalize_headers(df: pd.DataFrame):
     cols_orig = list(df.columns)
     cols_norm = [str(c).strip().upper() for c in cols_orig]
     return cols_orig, cols_norm
 
-# --- EUR stulpelio aptikimas pagal PAVADINIMĄ (header) su normalizacija ---
 def detect_currency_col_idx_headers(df: pd.DataFrame, currency: str = "EUR"):
     _, cols_norm = normalize_headers(df)
     try:
@@ -83,7 +78,6 @@ def detect_currency_col_idx_headers(df: pd.DataFrame, currency: str = "EUR"):
     except ValueError:
         return None
 
-# --- EUR stulpelio aptikimas pagal TURINĮ (langelių reikšmes) – case-insensitive ---
 def detect_currency_col_idx_content(df: pd.DataFrame, currency: str = "EUR"):
     best_idx, best_count = None, -1
     target = currency.upper().strip()
@@ -94,18 +88,14 @@ def detect_currency_col_idx_content(df: pd.DataFrame, currency: str = "EUR"):
             best_idx, best_count = i, cnt
     return best_idx if best_count > 0 else None
 
-# --- Tavo logika (robustiška): SUMOS = stulpelis prieš 'EUR' (header-based) ---
 def credit_amounts_by_header_logic(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series([], dtype=float)
-
     _, cols_norm = normalize_headers(df)
     amount_idx = None
-
     eur_idx = detect_currency_col_idx_headers(df, "EUR")
     if eur_idx is not None and eur_idx - 1 >= 0:
         amount_idx = eur_idx - 1
-
     if amount_idx is None:
         for i in range(len(cols_norm) - 1):
             if cols_norm[i + 1] == "EUR":
@@ -113,50 +103,29 @@ def credit_amounts_by_header_logic(df: pd.DataFrame) -> pd.Series:
                 if trial.abs().sum() > 0:
                     amount_idx = i
                     break
-
     if amount_idx is None:
         return pd.Series(0.0, index=df.index, dtype=float)
     return parse_eur_robust(df.iloc[:, amount_idx]).fillna(0.0)
 
-# --- „Universalus“ sumų nustatymas kreditinėms ---
 def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
-    """
-    Prioritetų seka:
-      (A) Jei jau yra pavadinti stulpeliai – 'Suma_su_PVM' arba 'Suma' arba 'SUM SU PVM' arba 'SUM'
-      (B) 'EUR' kaip antraštė -> imam stulpelį prieš jį (case-insensitive)
-      (C) 'EUR' kaip TURINYS -> imam stulpelį prieš jį (case-insensitive)
-      (D) 6-ta kolona (F)
-      (E) Heuristika: parenkam „labiausiai į sumas panašų“ skaitinį stulpelį
-      (F) Jei nieko – nulis
-    """
     if df is None or df.empty:
         return pd.Series([], dtype=float)
-
-    # (A)
     for col in ["Suma_su_PVM", "Suma", "SUM SU PVM", "SUM"]:
         if col in df.columns:
             s = parse_eur_robust(df[col]).fillna(0.0)
             if s.abs().sum() > 0:
                 return s
-
-    # (B)
     s = credit_amounts_by_header_logic(df)
     if s.abs().sum() > 0:
         return s
-
-    # (C)
     eur_idx = detect_currency_col_idx_content(df, "EUR")
     if eur_idx is not None and eur_idx - 1 >= 0:
         s = parse_eur_robust(df.iloc[:, eur_idx - 1]).fillna(0.0)
         if s.abs().sum() > 0:
             return s
-
-    # (D)
     s = amount_from_F(df)
     if s.abs().sum() > 0:
         return s
-
-    # (E)
     best_series = None
     best_score = (-1, -1.0)
     skip = {"DATA", "PASTABOS", "KLIENTAS", "SASKAITOS_NR", "TIPAS"}
@@ -175,14 +144,10 @@ def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
         if score > best_score:
             best_score = score
             best_series = ser
-
     if best_series is not None:
         return best_series.fillna(0.0)
-
-    # (F)
     return pd.Series(0.0, index=df.index, dtype=float)
 
-# Raktų normalizavimas
 def norm_alnum(x: str) -> str:
     if pd.isna(x):
         return ""
@@ -197,13 +162,6 @@ def only_digits(x: str) -> str:
     return re.sub(r"[^0-9]", "", str(x))
 
 def extract_last_from_notes(text: str) -> str:
-    """
-    PASKUTINĖ nuoroda iš Pastabų:
-      1) paskutinė 'VS...' (su uodega),
-      2) paskutinė 'AAA...' (su uodega),
-      3) kita alfanumerinė su bent 1 skaitmeniu.
-    Grąžina A-Z0-9.
-    """
     if pd.isna(text):
         return ""
     s = str(text).upper().replace('\u00A0', ' ')
@@ -218,11 +176,17 @@ def extract_last_from_notes(text: str) -> str:
         return ""
     return norm_alnum(candidates[-1])
 
-# Kreditinių prefiksas (atsarginis filtras, jei nėra „Tipas“)
 CREDIT_PREFIXES = ("COP", "KRE", "AAA")
 CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\s\-]*', re.IGNORECASE)
 def is_credit_number(x: str) -> bool:
     return isinstance(x, str) and bool(CREDIT_RE.match(x.strip()))
+
+def _norm_key_cols(df: pd.DataFrame, keys=("Klientas","SutartiesID")) -> pd.DataFrame:
+    for k in keys:
+        if k not in df.columns:
+            df[k] = ""
+        df[k] = df[k].apply(lambda v: "" if pd.isna(v) else str(v)).str.strip()
+    return df
 
 # =================== Įkelti duomenys ===================
 inv = ensure_df(st.session_state.get("inv_norm"))
@@ -301,6 +265,7 @@ inv_sum = (
     .rename("Israsyta")
     .reset_index()
 )
+inv_sum = _norm_key_cols(inv_sum, ("Klientas","SutartiesID"))
 
 # REDAGUOJAMI PLANAI
 if "plans" not in st.session_state:
@@ -315,6 +280,7 @@ else:
     plans["SutartiesPlanas"] = 0.0
 
 plans["SutartiesPlanas"] = pd.to_numeric(plans["SutartiesPlanas"], errors="coerce").fillna(0.0)
+plans = _norm_key_cols(plans, ("Klientas","SutartiesID"))
 
 st.markdown("### ✍️ Įvesk sutarčių planus (SU PVM)")
 plans = st.data_editor(
@@ -332,6 +298,7 @@ plans = st.data_editor(
 )
 plans["Klientas"] = plans["Klientas"].astype(str).str.strip()
 plans["SutartiesID"] = plans["SutartiesID"].astype(str).str.strip()
+plans = _norm_key_cols(plans, ("Klientas","SutartiesID"))
 st.session_state["plans"] = plans
 
 # =================== Kreditinių sąrašas (be susiejimo) ===================
@@ -359,7 +326,6 @@ c2.metric("Kreditinių suma (SU PVM)", f"{total_kred:,.2f} €")
 st.divider()
 st.subheader("🔗 Kreditinių pririšimas prie sutarčių (per išrašytos sąskaitos numerį)")
 
-# 1) Raktas iš IŠRAŠYTŲ sąskaitų numerio (VS..., AAA..., arba pats numeris)
 inv_key = (
     inv[["Data", "Saskaitos_NR", "Klientas", "SutartiesID"]]
     .dropna(subset=["Saskaitos_NR"])
@@ -381,10 +347,9 @@ inv_key_unique = (
            [["Key_inv_best", "Klientas_inv", "SutartiesID_inv"]]
 )
 
-# 2) Iš KREDITINIŲ: nuoroda į išrašytą sąskaitą iš „Pastabų“
 if crn_f is None or crn_f.empty:
-    st.info("Kreditinių šiame laikotarpyje nėra – pririšti nėra ko.")
     out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
+    out = _norm_key_cols(out, ("Klientas","SutartiesID"))
     out["Israsyta"] = out["Israsyta"].apply(floor2)
     out["Kredituota"] = 0.0
     out["Faktas"] = out["Israsyta"]
@@ -392,18 +357,11 @@ if crn_f is None or crn_f.empty:
 else:
     work = crn_f.copy()
     work["Key_ref"] = work.get("Pastabos", pd.Series(index=work.index, dtype=str)).apply(extract_last_from_notes)
-
-    # 3) Sujungiame kreditinę su IŠRAŠYTA sąskaita per nuorodos raktą
     work = work.merge(inv_key_unique, left_on="Key_ref", right_on="Key_inv_best", how="left")
-
-    # 4) Kreditinės sumos (teigiama reikšmė mažinimui)
     work["Suma_su_PVM"] = work["Suma_su_PVM"].astype(float).fillna(0.0)
     work["Kredituota_pos"] = work["Suma_su_PVM"].abs()
-
-    # 5) Paliekame tik tas kreditines, kurios sėkmingai paveldėjo sutartį iš IŠRAŠYTOS sąskaitos
     work_ok = work[work["SutartiesID_inv"].astype(str).str.strip() != ""].copy()
 
-    # 6) Agreguojame „Kredituota“ sutarties lygiu
     if not work_ok.empty:
         crn_sum = (
             work_ok.groupby(["Klientas_inv", "SutartiesID_inv"], dropna=False)["Kredituota_pos"]
@@ -416,17 +374,22 @@ else:
             })
         )
     else:
-        crn_sum = pd.DataFrame(columns=["Klientas", "SutartiesID", "Kredituota"])
+        crn_sum = pd.DataFrame(columns=["Klientas","SutartiesID","Kredituota"])
 
-    # 7) Į Likučius: sujungiame „Kredituota“ ir perskaičiuojame Faktą/Like
+    crn_sum = _norm_key_cols(crn_sum, ("Klientas","SutartiesID"))
+    crn_sum = crn_sum.groupby(["Klientas","SutartiesID"], as_index=False, dropna=False)["Kredituota"].sum()
+
     out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
-    out = pd.merge(out, crn_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Kredituota": 0.0})
+    out = _norm_key_cols(out, ("Klientas","SutartiesID"))
+
+    out = out.merge(crn_sum, how="left", on=["Klientas","SutartiesID"])
+    out["Kredituota"] = pd.to_numeric(out["Kredituota"], errors="coerce").fillna(0.0)
+
     out["Israsyta"]  = out["Israsyta"].apply(floor2)
     out["Kredituota"] = out["Kredituota"].apply(floor2)
     out["Faktas"]    = (out["Israsyta"] - out["Kredituota"]).apply(floor2)
     out["Like"]      = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
 
-    # 8) Metrika – kiek kreditinių pavyko pririšti
     st.metric("Pririštų kreditinių skaičius", f"{len(work_ok):,}")
 
 # =================== KPI ir Likučių lentelė ===================
@@ -504,7 +467,6 @@ if sel_client and sel_contract:
 
         st.dataframe(one[show_cols], use_container_width=True)
 
-        # Eksportas – tik ši sutartis
         buf_one = BytesIO()
         with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
             one[show_cols].to_excel(xw, sheet_name=safe_sheet_name(sel_contract, "Sutartis"), index=False)
