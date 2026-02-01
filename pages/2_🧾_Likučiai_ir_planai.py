@@ -50,64 +50,26 @@ def safe_filename(name: str, max_len: int = 150) -> str:
     name = re.sub(r'[\\/:*?"<>|\r\n]+', "_", name).strip(" .")
     return (name or "export")[:max_len]
 
-# ======== Patikimas LT/EU sumų parse (nebeliks 0 dėl formato) ========
+# ======== Patikimas LT/EU sumų parse ========
 def parse_eur_robust(series):
     """
-    Konvertuoja LT/EU formato tekstą į float:
-    – pašalina NBSP, tarpus, €, kitus simbolius;
-    – '−' (U+2212) -> '-';
-    – ',' -> '.';
-    – leidžia tik 0-9 . -
+    Konvertuoja LT/EU formatą į float:
+    – pašalina NBSP, tarpus, €, '−' (U+2212) -> '-'; ',' -> '.'
     """
     if series is None:
         return pd.Series(dtype=float)
     s = series.astype(str)
-    s = s.str.replace('\u2212', '-', regex=False)              # minus U+2212
-    s = s.str.replace('\u00A0', '', regex=False)               # NBSP lauk
-    s = s.str.replace(' ', '', regex=False)                    # tarpai lauk
-    s = s.str.replace('€', '', regex=False)                    # valiuta lauk
-    s = s.str.replace(',', '.', regex=False)                   # kablelis -> taškas
-    s = s.str.replace(r'[^0-9\.\-]', '', regex=True)           # tik 0-9 . -
+    s = s.str.replace('\u2212', '-', regex=False)  # U+2212
+    s = s.str.replace('\u00A0', '', regex=False)   # NBSP
+    s = s.str.replace(' ', '', regex=False)
+    s = s.str.replace('€', '', regex=False)
+    s = s.str.replace(',', '.', regex=False)
+    s = s.str.replace(r'[^0-9\.\-]', '', regex=True)
     return pd.to_numeric(s, errors='coerce')
 
-def pick_amount_column(df, candidates=None, default_col="Suma_su_PVM"):
-    """
-    Parenka iš kur imti sumą (kreditinėms ar invoisams).
-    Logika:
-    1) Pavadinimų kandidatai (regex orderis), imame pirmą, kur != 0 bent vienoje eilutėje po parse.
-    2) Jei nieko – imame default_col (jei yra), kad bent būtų 0.0 (nesiverčia į NaN).
-    """
-    if df is None or df.empty:
-        return pd.Series([], dtype=float), None
-
-    cols = {c: c for c in df.columns}
-    if candidates is None:
-        candidates = [
-            r'(?i)^suma[_\s]*su[_\s]*pvm$',      # Suma_su_PVM, Suma su PVM
-            r'(?i)^suma$',                       # Suma
-            r'(?i)total',                        # total
-            r'(?i)amount',                       # amount
-            r'(?i)sum$',                         # sum
-        ]
-
-    # Einam per kandidatų regex
-    for rx in candidates:
-        match_cols = [c for c in df.columns if re.search(rx, str(c))]
-        for mc in match_cols:
-            vals = parse_eur_robust(df[mc])
-            if (vals.fillna(0).abs() > 0).any():
-                return vals.fillna(0.0), mc  # radom realią sumą
-
-    # Jei nepavyko – bandome default
-    if default_col in df.columns:
-        return parse_eur_robust(df[default_col]).fillna(0.0), default_col
-
-    # Nieko – grąžinam nulį
-    return pd.Series([0.0]*len(df), index=df.index, dtype=float), None
-
-# ===== Normalizavimai raktams =====
+# ======== Paprasti raktai susiejimui ========
 def norm_alnum(x: str) -> str:
-    """Paverčia į A-Z0-9 (pašalina tarpus, brūkšnius, simbolius)."""
+    """Palieka tik A-Z0-9 (susiejimo raktams)."""
     if pd.isna(x):
         return ""
     s = str(x).upper().strip()
@@ -122,12 +84,11 @@ def only_digits(x: str) -> str:
 
 def extract_last_from_notes(text: str) -> str:
     """
-    PAIMAM PASKUTINĘ nuorodą iš Pastabų:
+    PASKUTINĖ nuoroda iš Pastabų:
       1) paskutinė 'VS...' (su uodega),
       2) paskutinė 'AAA...' (su uodega),
-      3) paskutinė alfanumerinė su bent 1 skaitmeniu (pvz. SF-2024-0012, INV0007, PV-12345),
-      4) jei nieko – paskutinė skaitmenų seka (>=5).
-    Viską išvalom į A-Z0-9.
+      3) kitaip – paskutinė alfanumerinė su bent 1 skaitmeniu.
+    Grąžina A-Z0-9.
     """
     if pd.isna(text):
         return ""
@@ -143,24 +104,20 @@ def extract_last_from_notes(text: str) -> str:
     alnum = re.findall(r'([A-Z0-9][A-Z0-9\-/]*\d[A-Z0-9\-/]*)', s)
     if alnum: candidates.extend(alnum)
 
-    digits = re.findall(r'(\d{5,})', s)
-    if digits: candidates.extend(digits)
-
     if not candidates:
         return ""
-    last = candidates[-1]
-    return norm_alnum(last)
+    return norm_alnum(candidates[-1])
 
-# =================== Duomenų paruošimas ===================
+# =================== Duomenys iš sesijos ===================
 inv = ensure_df(st.session_state.get("inv_norm"))
-crn = ensure_df(st.session_state.get("crn_norm"))
+crn_raw = ensure_df(st.session_state.get("crn_norm"))
 
 if inv is None:
     st.warning("Įkelk duomenis skiltyje **📥 Įkėlimas**.")
     st.stop()
 
-# Tipų sanitarija
-for df in [inv, crn] if crn is not None else [inv]:
+# ===== Sanitarija (BENDRA) =====
+for df in [inv, crn_raw] if crn_raw is not None else [inv]:
     if "Data" in df.columns:
         df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
     if "Klientas" in df.columns:
@@ -175,21 +132,30 @@ for df in [inv, crn] if crn is not None else [inv]:
     if "Pastabos" in df.columns:
         df["Pastabos"] = df["Pastabos"].astype(str)
 
-# ===== Sumas užpildom patikimai iš realių stulpelių =====
-# INV
-inv_amounts, inv_amount_col = pick_amount_column(inv, candidates=[
-    r'(?i)^suma[_\s]*su[_\s]*pvm$', r'(?i)^suma$', r'(?i)total', r'(?i)amount'
-])
-inv["Suma_su_PVM"] = inv_amounts
+# ===== Išrašytų sumos =====
+inv["Suma_su_PVM"] = parse_eur_robust(inv.get("Suma_su_PVM", inv.get("Suma", 0))).fillna(0.0)
 
-# CRN
-if crn is not None:
-    crn_amounts, crn_amount_col = pick_amount_column(crn, candidates=[
-        r'(?i)^suma[_\s]*su[_\s]*pvm$', r'(?i)^suma$', r'(?i)total', r'(?i)amount'
-    ])
-    crn["Suma_su_PVM"] = crn_amounts
-    # Apsauga: kreditinių SutartiesID niekada nenaudojam (kad netyčia nepatektų sumos)
+# ===== Kreditinių – TIK  „Tipas = Kreditinė“  + sumos TIESIAI iš F (6 kolona) =====
+if crn_raw is not None:
+    crn = crn_raw.copy()
+
+    # 1) paliekam TIK kreditines (nebe bus 3000+)
+    if "Tipas" in crn.columns:
+        mask_tip = crn["Tipas"].astype(str).str.strip().str.lower().str.contains("kredit")
+        crn = crn.loc[mask_tip].copy()
+
+    # 2) SUMA VISADA iš F kolonos (jei yra)
+    if crn.shape[1] >= 6:
+        crn["Suma_su_PVM"] = parse_eur_robust(crn.iloc[:, 5]).fillna(0.0)
+    else:
+        # atsarginis – jei failas su mažiau stulpelių
+        crn["Suma_su_PVM"] = parse_eur_robust(crn.get("Suma_su_PVM", crn.get("Suma", 0))).fillna(0.0)
+
+    # 3) NIEKADA nenaudojam kreditinės SutartiesID
     crn["SutartiesID"] = ""
+
+else:
+    crn = None
 
 # =================== 📅 Laikotarpio filtras ===================
 dmin, dmax = get_min_max_date(inv, crn)
@@ -218,18 +184,19 @@ inv_key = (
     .dropna(subset=["Saskaitos_NR"])
     .copy()
 )
-# Raktas: jei iš pačio numerio pavyksta VS/AAA – naudok, kitaip visas numeris (A-Z0-9)
-inv_key["Key_inv_vsaaa"] = inv_key["Saskaitos_NR"].apply(extract_last_from_notes)  # panaudojam tą pačią logiką
-inv_key["Saskaitos_NR_norm"] = inv_key["Saskaitos_NR"].apply(norm_alnum)
-inv_key["Key_inv_best"] = np.where(
-    inv_key["Key_inv_vsaaa"].astype(str).str.strip() != "",
-    inv_key["Key_inv_vsaaa"],
-    inv_key["Saskaitos_NR_norm"]
-)
+
+# Jei pačiame invoiso numeryje yra VS/AAA – imame; kitaip – visas numeris (A-Z0-9)
+def extract_from_number(nr: str) -> str:
+    if pd.isna(nr): return ""
+    s = str(nr).upper()
+    m = re.search(r'(VS[^\s]+)$', s) or re.search(r'(AAA[^\s]+)$', s)
+    return norm_alnum(m.group(1)) if m else norm_alnum(s)
+
+inv_key["Key_inv_best"] = inv_key["Saskaitos_NR"].apply(extract_from_number)
 inv_key["Key_inv_digits"] = inv_key["Key_inv_best"].apply(only_digits)
 inv_key = inv_key.rename(columns={"Klientas": "Klientas_inv", "SutartiesID": "SutartiesID_inv"})
 
-# Vienas įrašas per raktą (fan-out fix – imame vėliausią pagal datą)
+# many-to-one: vienas raktas -> vienas įrašas (vėliausia sąskaita pagal datą)
 inv_key = inv_key.sort_values(["Data", "Saskaitos_NR"])
 inv_key = inv_key[inv_key["Key_inv_best"].astype(str).str.strip() != ""].copy()
 inv_key_unique = (
@@ -239,10 +206,9 @@ inv_key_unique = (
 )
 
 # =================== CRN susiejimas (iš Pastabų) ===================
-if crn is not None:
+if crn is not None and not crn.empty:
     crn_work = crn.copy()
-
-    # Raktas VISADA iš Pastabų (pagal tavo teiginį, jos visos turi išrašytos sąsk. numerį)
+    # Raktas VISADA iš Pastabų
     crn_work["Key_crn"] = crn_work.get("Pastabos", pd.Series(index=crn_work.index, dtype=str)).apply(extract_last_from_notes)
     crn_work["Key_crn_digits"] = crn_work["Key_crn"].apply(only_digits)
 
@@ -275,11 +241,11 @@ if crn is not None:
 else:
     crn_f = None
 
-# Greita sumų diagnostika (turi nebebūti 0, jei faile yra sumos)
+# ===== Informacinės eilutės (po filtrų turi matytis ~18 kreditinių) =====
 if crn is not None:
-    st.caption(f"💳 Kreditinių įkeltų eilučių: {len(crn)} | Bendra suma (visų): {parse_eur_robust(crn['Suma_su_PVM']).sum():,.2f}")
+    st.caption(f"💳 Kreditinių eilučių iš įkėlimo: {len(crn)} | Bendra suma (visų): {crn['Suma_su_PVM'].sum():,.2f}")
 if crn_f is not None and not crn_f.empty:
-    st.caption(f"📆 Kreditinių suma pasirinktame laikotarpyje: {crn_f['Suma_su_PVM'].sum():,.2f}")
+    st.caption(f"📆 Kreditinių suma laikotarpyje: {crn_f['Suma_su_PVM'].sum():,.2f} | Eilučių: {len(crn_f)}")
 
 # =================== Jei viskas tuščia – stabdom ===================
 if inv_f.empty and (crn_f is None or crn_f.empty):
@@ -297,10 +263,7 @@ inv_sum = (
 
 # Kreditinės (į Faktą eis su minusu). Agreguojame TIK susietas su sutartimi.
 if crn_f is not None and not crn_f.empty:
-    # dar kartą užtikrinam skaičius
-    crn_f["Suma_su_PVM"] = parse_eur_robust(crn_f["Suma_su_PVM"]).fillna(0.0)
-
-    # Užfiksuojam į ataskaitą – RODOMA suma (teigiama), o pasirašymui į faktą – su minusu
+    crn_f["Suma_su_PVM"] = crn_f["Suma_su_PVM"].astype(float).fillna(0.0)
     crn_f["Kredituota_pos"] = crn_f["Suma_su_PVM"].abs()
     crn_f["Kredituota_signed"] = -crn_f["Kredituota_pos"]
 
@@ -319,7 +282,7 @@ else:
     crn_sum_signed = pd.DataFrame(columns=["Klientas", "SutartiesID", "Kredituota_signed"])
     crn_sum = pd.DataFrame(columns=["Klientas", "SutartiesID", "Kredituota"])
 
-# Sujungiame į faktą
+# Sujungiame
 fact = pd.merge(inv_sum, crn_sum, how="outer", on=["Klientas", "SutartiesID"]).fillna(0.0)
 fact = pd.merge(
     fact,
@@ -414,24 +377,16 @@ cols_order = [
 show_cols = [c for c in cols_order if c in out.columns]
 st.dataframe(out[show_cols].sort_values(["Klientas", "SutartiesID"]), use_container_width=True)
 
-# =================== Diagnostika: SUMOS ir RAKTAI ===================
+# =================== Diagnostika (turi matytis ~18 kreditinių po filtro) ===================
 st.divider()
-st.subheader("🔎 Diagnostika")
+st.subheader("🔎 Diagnostika (kreditinės)")
 if crn is not None and crn_f is not None and not crn_f.empty:
-    total_crn = len(crn_f)
-    matched_crn = (crn_f["SutartiesID_final"].astype(str).str.strip() != "").sum()
-    st.write(f"💳 Kreditinių laikotarpyje: **{total_crn}** | Susieta: **{matched_crn}** | Nesusieta: **{total_crn - matched_crn}**")
-    # ar sumos nulinės?
+    st.write(f"💳 Kreditinių laikotarpyje: **{len(crn_f)}** (iš įkeltų: {len(crn)})")
     zeros = (crn_f["Suma_su_PVM"].abs() < 1e-12).sum()
     if zeros > 0:
-        st.error(f"⚠️ {zeros} kreditinių eilučių turi 0 sumą po parse. Žemiau – iš kur skaitom:")
-        # parodyti iš kokio stulpelio paimta suma
-        st.write(f"CRN sumos paimtos iš stulpelio: **{crn_amount_col or 'nerastas – naudotas numatytasis Suma_su_PVM'}**")
-        sample_cols = [c for c in ["Data","Saskaitos_NR","Klientas","Pastabos","Suma","Suma_su_PVM"] if c in crn.columns]
-        st.dataframe(crn[sample_cols].head(15), use_container_width=True)
-
-    with st.expander("Pavyzdžiai (Pastabos → Key_crn → Sutartis → Suma):", expanded=False):
-        cols_dbg = [c for c in ["Data","Saskaitos_NR","Pastabos","Key_crn","Key_crn_digits","SutartiesID_final","Suma_su_PVM"] if c in crn_f.columns]
+        st.error(f"⚠️ 0 sumos kreditinių eilučių: {zeros}. Sumos imamos iš **F** kolonos – patikrink šaltinį.")
+    with st.expander("Pavyzdžiai (Pastabos → raktas → sutartis → suma):", expanded=False):
+        cols_dbg = [c for c in ["Data","Saskaitos_NR","Pastabos","Key_crn","SutartiesID_final","Suma_su_PVM"] if c in crn_f.columns]
         st.dataframe(crn_f[cols_dbg].head(30), use_container_width=True)
 
 # =================== Eksportas ===================
@@ -441,12 +396,6 @@ with pd.ExcelWriter(buf, engine="openpyxl") as xw:
     inv_f.to_excel(xw, sheet_name="Saskaitos_ISRASYTA_SU_PVM", index=False)
     if crn_f is not None and not crn_f.empty:
         crn_f.to_excel(xw, sheet_name="Kreditines_SU_PVM", index=False)
-        missing_map = crn_f[
-            (crn_f["SutartiesID_final"].astype(str).str.strip() == "") |
-            (crn_f["Key_crn"].astype(str).str.strip() == "")
-        ].copy()
-        if not missing_map.empty:
-            missing_map.to_excel(xw, sheet_name="CRN_neuzrisa", index=False)
 
 st.download_button(
     "⬇️ Eksportuoti suvestinę (.xlsx)",
