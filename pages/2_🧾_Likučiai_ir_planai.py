@@ -48,36 +48,52 @@ def safe_filename(name: str, max_len: int = 150) -> str:
     return (name or "export")[:max_len]
 
 # =================== Kreditinių atpažinimas ===================
-# Kreditinės numeris gali prasidėti COP / KRE / AAA
-CREDIT_PREFIXES = ("COP", "KRE", "AAA")
+# (Naudojama tik tam, kad kredito sąrašas nepriimtų šiukšlių)
+CREDIT_PREFIXES = ("COP", "KRE", "AAA")  # AAA gali būti ir kredito numerio prefiksas
 CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\s\-]*', re.IGNORECASE)
 
 def is_credit_number(x: str) -> bool:
     """Ar tekstas atrodo kaip kreditinės numeris pagal suderintus prefiksus?"""
     return isinstance(x, str) and bool(CREDIT_RE.match(x.strip()))
 
-# ===== Vienodas VS-/INV-/SF- numerių normalizavimas (raktams) =====
-def norm_nr(x: str) -> str:
+# =================== Tavo TAISYKLĖ: VS/AAA ištrauka ===================
+def extract_last_vs_aaa(text: str) -> str:
     """
-    Suvienodina numerius: pašalina tarpus, suvienodina brūkšnius ir palieka tik A–Z0–9.
-    Pvz.: 'VS – 12345' -> 'VS12345'; 'VS-00123' -> 'VS00123'
+    Grąžina raktą iš Pastabų arba sąskaitos numerio, pagal taisyklę:
+    - Jei yra 'VS' arba 'AAA' – imame paskutinį tokį pasirodymą,
+      paimame nuo jo iki eilutės pabaigos,
+      tada paliekame tik A-Z ir 0-9 (t.y., viską išvalome į raktą).
+    - Jei nerado – grąžina tuščią.
+    Pvz.:
+      "koreguojame VS – 1234"      -> "VS1234"
+      "VS001 VS002 VS003"          -> "VS003"
+      "VS12-34-567##%"             -> "VS1234567"
+      "xxx AAA-0009 yyy"           -> "AAA0009"
+      "be VS ir AAA"               -> ""
     """
-    if pd.isna(x):
+    if pd.isna(text):
         return ""
-    s = str(x).upper().strip()
-    s = s.replace("–", "-").replace("—", "-")      # en/em dash -> '-'
-    s = re.sub(r"\s+", "", s)                      # šalinam tarpus
-    s = re.sub(r"[^A-Z0-9]", "", s)                # paliekam tik A-Z ir 0-9
-    return s
+    s = str(text).upper()
 
-# Platesnė VS numerio paieška (3–12 skaitmenų). Jei reikia, galima plėsti į (VS|SF|INV).
-INV_RE_ALL = re.compile(r"(VS\s*[-–]?\s*\d{3,12})", re.IGNORECASE)
+    # Susirandam visas VS/AAA pozicijas
+    matches = list(re.finditer(r'(VS|AAA)', s))
+    if not matches:
+        return ""
+
+    # Imame paskutinės (pagal taisyklę) poziciją
+    start = matches[-1].start()
+
+    # Paimam nuo start iki eilutės pabaigos ir išvalom
+    tail = s[start:]
+    key = re.sub(r'[^A-Z0-9]', '', tail)  # tik A-Z0-9
+
+    return key
 
 # ====== Kreditinių normalizatorius (jei ateina „žalias“) ======
 def normalize_credit_df_if_needed(crn_raw: pd.DataFrame | None) -> pd.DataFrame | None:
     """
     Jei kreditinės atėjo kaip „be antraščių“ failas (A=Data, B=Kreditinės_NR, D=Klientas, E=Pastabos, F=Suma_su_PVM),
-    normalizuojam iki bendros schemos: Data, Saskaitos_NR (kreditinės), Klientas, Pastabos, Suma_su_PVM, Susieta_Inv_NR, Tipas.
+    normalizuojam iki bendros schemos: Data, Saskaitos_NR (kreditinės), Klientas, Pastabos, Suma_su_PVM, Tipas.
     """
     if crn_raw is None or crn_raw.empty:
         return crn_raw
@@ -90,11 +106,6 @@ def normalize_credit_df_if_needed(crn_raw: pd.DataFrame | None) -> pd.DataFrame 
         d["Suma_su_PVM"] = pd.to_numeric(d.get("Suma_su_PVM", 0), errors="coerce").fillna(0.0)
         if "Tipas" not in d.columns:
             d["Tipas"] = "Kreditinė"
-        if "Susieta_Inv_NR" not in d.columns:
-            d["Susieta_Inv_NR"] = (
-                d.get("Pastabos", pd.Series(index=d.index, dtype=str)).astype(str)
-                .apply(lambda s: (lambda hits: hits[-1] if (hits := INV_RE_ALL.findall(s)) else pd.NA)(s))
-            )
         return d
 
     # Interpretuojam kaip A,B,D,E,F (be antraščių)
@@ -112,17 +123,6 @@ def normalize_credit_df_if_needed(crn_raw: pd.DataFrame | None) -> pd.DataFrame 
         # Tikros kreditinės pagal prefiksus
         mask_crn = df["Kreditines_NR"].astype(str).apply(is_credit_number)
         df = df.loc[mask_crn].copy()
-
-        # Iš Pastabų iškeliame susietą VS- numerį (jei keli – imam paskutinį)
-        def extract_last_vs(s):
-            if pd.isna(s):
-                return pd.NA
-            hits = INV_RE_ALL.findall(str(s))
-            if not hits:
-                return pd.NA
-            return hits[-1].upper()
-
-        df["Susieta_Inv_NR"] = df["Pastabos"].apply(extract_last_vs)
 
         df = df.rename(columns={"Kreditines_NR": "Saskaitos_NR"})
         df["Saskaitos_NR"] = df["Saskaitos_NR"].astype(str).str.strip().str.upper()
@@ -153,6 +153,8 @@ for df in [inv, crn] if crn is not None else [inv]:
     df["Suma_su_PVM"] = pd.to_numeric(df.get("Suma_su_PVM", df.get("Suma", 0)), errors="coerce").fillna(0.0)
     if "Saskaitos_NR" in df.columns:
         df["Saskaitos_NR"] = df["Saskaitos_NR"].astype(str).str.strip().str.upper()
+    if "Pastabos" in df.columns:
+        df["Pastabos"] = df["Pastabos"].astype(str)
 
 # Jei kreditinės dar „žalios“, normalizuojam
 if crn is not None:
@@ -181,42 +183,37 @@ mask_inv = inv["Data"].dt.date.between(nuo, iki)
 inv_f = inv.loc[mask_inv].copy()
 
 # =================== Raktas susiejimui (iš VISŲ invoisų) ===================
+# Išrašytoms sąskaitoms formuojame raktą iš jų numerio:
+# - paimame paskutinį 'VS' arba 'AAA' fragmentą ir jo „uodegą“
 inv_key = (
     inv[["Saskaitos_NR", "Klientas", "SutartiesID"]]
     .dropna(subset=["Saskaitos_NR"])
     .copy()
 )
 inv_key["Saskaitos_NR"] = inv_key["Saskaitos_NR"].astype(str).str.strip().str.upper()
-inv_key["Saskaitos_NR_key"] = inv_key["Saskaitos_NR"].apply(norm_nr)
+inv_key["JoinKey"] = inv_key["Saskaitos_NR"].apply(extract_last_vs_aaa)
+
+# jei JoinKey tuščias, jungti nebepavyks – paliekam tuščius (tokie vis tiek nesusijungs)
 inv_key = inv_key.rename(columns={
     "Klientas": "Klientas_inv",
     "SutartiesID": "SutartiesID_inv"
 })
 
-# =================== Kreditinių susiejimas per išrašytą sąskaitą ===================
+# =================== Kreditinių susiejimas per išrašytą sąskaitą (VS/AAA) ===================
 if crn is not None:
     crn_work = crn.copy()
 
-    # Tikros kreditinės pagal prefiksus
+    # Tikros kreditinės pagal prefiksus (COP/KRE/AAA)
     if "Saskaitos_NR" in crn_work.columns:
         crn_work = crn_work[crn_work["Saskaitos_NR"].astype(str).apply(is_credit_number)].copy()
 
-    # Jei trūksta „Susieta_Inv_NR“ – iš Pastabų paimam paskutinį VS-… (platesnis regex)
-    if "Susieta_Inv_NR" not in crn_work.columns:
-        crn_work["Susieta_Inv_NR"] = (
-            crn_work.get("Pastabos", pd.Series(index=crn_work.index, dtype=str)).astype(str)
-            .apply(lambda s: (lambda hits: hits[-1] if (hits := INV_RE_ALL.findall(s)) else pd.NA)(s))
-        )
+    # Kreditinėms raktą VISADA gauname iš Pastabų pagal taisyklę: paskutinis VS/AAA ir jo uodega
+    crn_work["JoinKey"] = crn_work.get("Pastabos", pd.Series(index=crn_work.index, dtype=str)).apply(extract_last_vs_aaa)
 
-    # Normalizuoti raktai abiem pusėm
-    crn_work["Susieta_Inv_NR"] = crn_work["Susieta_Inv_NR"].astype(str).str.strip().str.upper()
-    crn_work["Susieta_Inv_NR_key"] = crn_work["Susieta_Inv_NR"].apply(norm_nr)
-
-    # MERGE tik per normalizuotą KEY
+    # MERGE tik per JoinKey
     crn_work = crn_work.merge(
-        inv_key[["Saskaitos_NR_key", "Klientas_inv", "SutartiesID_inv"]],
-        left_on="Susieta_Inv_NR_key",
-        right_on="Saskaitos_NR_key",
+        inv_key[["JoinKey", "Klientas_inv", "SutartiesID_inv"]],
+        on="JoinKey",
         how="left",
     )
 
@@ -248,7 +245,7 @@ inv_sum = (
 if crn_f is not None and not crn_f.empty:
     crn_f["Kredituota_signed"] = -crn_f["Suma_su_PVM"].abs()
 
-    # Tik kreditinės, kurioms pavyko gauti sutartį iš išrašytos
+    # Tik kreditinės, kurioms pavyko gauti sutartį iš išrašytos (per JoinKey)
     crn_ok = crn_f[crn_f["SutartiesID_final"].astype(str).str.strip() != ""].copy()
 
     crn_sum_signed = (
@@ -425,8 +422,7 @@ else:
 if crn_f is not None and not crn_f.empty:
     missing_map = crn_f[
         (crn_f["SutartiesID_final"].astype(str).str.strip() == "") |
-        crn_f["Susieta_Inv_NR"].isna() |
-        (crn_f["Susieta_Inv_NR"].astype(str).str.strip() == "")
+        (crn_f["JoinKey"].astype(str).str.strip() == "")
     ].copy()
     with st.expander("🔎 Kreditinių susiejimo diagnostika", expanded=False):
         st.write("Nesusietos kreditinės (neįtrauktos į sumas):")
@@ -435,15 +431,14 @@ if crn_f is not None and not crn_f.empty:
         else:
             cols_diag = [
                 "Data", "Saskaitos_NR", "Klientas", "Pastabos",
-                "Susieta_Inv_NR", "Susieta_Inv_NR_key",
-                "SutartiesID_inv", "SutartiesID_final", "Suma_su_PVM"
+                "JoinKey", "SutartiesID_inv", "SutartiesID_final", "Suma_su_PVM"
             ]
             show_diag = [c for c in cols_diag if c in missing_map.columns]
             st.dataframe(
                 missing_map[show_diag].sort_values("Data"),
                 use_container_width=True
             )
-            st.info("Patarimas: patikrink, ar „Pastabose“ įrašytas teisingas VS‑ numeris, atitinkantis išrašytos sąskaitos numerį.")
+            st.info("Patarimas: Pastabose turi būti bent viena VS arba AAA seka; jei kelios – naudojama paskutinė.")
 
 # =================== Eksportas – visa suvestinė (pagal laikotarpį) ===================
 buf = BytesIO()
@@ -455,8 +450,7 @@ with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         # Papildomai – neužsirišusios kreditinės
         missing_map = crn_f[
             (crn_f["SutartiesID_final"].astype(str).str.strip() == "") |
-            crn_f["Susieta_Inv_NR"].isna() |
-            (crn_f["Susieta_Inv_NR"].astype(str).str.strip() == "")
+            (crn_f["JoinKey"].astype(str).str.strip() == "")
         ].copy()
         if not missing_map.empty:
             missing_map.to_excel(xw, sheet_name="CRN_neuzrisa", index=False)
