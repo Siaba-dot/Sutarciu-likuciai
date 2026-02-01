@@ -1,12 +1,14 @@
-# pages/3_📈_MoM_WoW_kiekiai.py
+    # pages/3_📈_MoM_WoW_kiekiai.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date
 
-# --- Nauja: Plotly importai ir tema ---
+# --- Plotly: tema ---
 import plotly.graph_objects as go
 import plotly.io as pio
+
+# Vieną kartą puslapio config
 st.set_page_config(layout="wide")
 
 # --- Kompaktinis tamsus išdėstymas: mažesni tarpai ir antraščių dydžiai ---
@@ -32,7 +34,6 @@ st.markdown("""
   .modebar {transform: scale(0.95); transform-origin: top right;}
 </style>
 """, unsafe_allow_html=True)
-# pages/3_📈_MoM_WoW_kiekiai.py
 
 # Vieningas tamsus/neon šablonas „wow“
 pio.templates["sigita_dark"] = go.layout.Template(
@@ -51,45 +52,33 @@ pio.templates["sigita_dark"] = go.layout.Template(
 pio.templates.default = "sigita_dark"
 
 # --- Puslapio UI ---
-st.set_page_config(layout="wide")
 st.header("📈 Dokumentų kiekio dinamika (MoM & WoW)")
-
-# Šiek tiek kompaktiškesni tarpai
-st.markdown("""
-<style>
-  .block-container {padding-top: .75rem; padding-bottom: 1rem; max-width: 1500px;}
-  header[data-testid="stHeader"] {height: 0rem;}
-</style>
-""", unsafe_allow_html=True)
 
 # ===================== Pagalbinės =====================
 
 def ensure_df(src):
     """Tikimės DataFrame iš Įkėlimo puslapio."""
-    if src is None:
-        return None
     return src if isinstance(src, pd.DataFrame) else None
 
-def pick_id_column(df: pd.DataFrame) -> str | None:
+def pick_id_column_strict(df: pd.DataFrame) -> str | None:
     """
-    Randa dokumento ID stulpelį:
-    Pirmenybė: 'Saskaitos_NR', bet palaikomi ir kiti dažni pavadinimai.
+    Grąžina dokumento numerio stulpelį.
+    * Griežta tvarka – NEIMAME generinių ('Numeris', 'No', 'Dok_ID'), nes jie dažnai eilučių ID.
+    Pirmenybė:
+      - 'Saskaitos_NR', 'SaskaitosNr', 'InvoiceNo'
+      - 'Dokumento_Nr', 'DokumentoNr'
     """
     if df is None or df.empty:
         return None
-    candidates = [
-        "Saskaitos_NR", "SaskaitosNr", "InvoiceNo",
-        "Dok_ID", "DokID", "Dokumento_Nr", "DokumentoNr",
-        "DokNumeris", "Numeris", "No"
-    ]
+    prefer = ["Saskaitos_NR", "SaskaitosNr", "InvoiceNo", "Dokumento_Nr", "DokumentoNr"]
     cols = set(df.columns)
-    for c in candidates:
+    for c in prefer:
         if c in cols:
             return c
-    return None
+    return None  # jei neradom – geriau sustabdyti su diagnostika, nei suskaičiuoti nesąmones
 
 def to_period_series(s: pd.Series, granularity: str) -> pd.Series:
-    """pandas Period: 'M' arba 'W-MON' -> str (gražiai grupavimui ir lentelei)."""
+    """pandas Period: 'M' arba 'W-MON' -> str (grupavimui ir lentelei)."""
     if granularity == "M":
         return s.dt.to_period("M").astype(str)        # YYYY-MM
     else:
@@ -105,21 +94,22 @@ def period_start_ts(p: str, granularity: str) -> pd.Timestamp:
     except Exception:
         return pd.NaT
 
-def counts(df: pd.DataFrame, id_col: str, granularity: str) -> pd.DataFrame:
+def counts_unique_docs(df: pd.DataFrame, id_col: str, granularity: str) -> pd.DataFrame:
     """
     Grąžina DF su stulpeliais: Periodas, Kiekis
-    - granularity: 'M' arba 'W'
+    Skaičiuoja UNIKALIUS dokumentus per periodą – ignoruoja eilučių dublikatus.
     """
     d = df.copy()
     d["Data"] = pd.to_datetime(d["Data"], errors="coerce")
-    d = d.dropna(subset=["Data"])
+    d = d.dropna(subset=["Data", id_col])
     if d.empty:
         return pd.DataFrame(columns=["Periodas", "Kiekis"])
-    period = to_period_series(d["Data"], "M" if granularity == "M" else "W")
+    # jei df ateina „eilutėmis“, dublikuoto docID per tą patį periodą nebedidins kiekio
+    d["Periodas"] = to_period_series(d["Data"], "M" if granularity == "M" else "W")
+    d = d.drop_duplicates(subset=["Periodas", id_col])  # ← svarbu
     x = (
-        d.assign(Periodas=period)
-         .groupby("Periodas")[id_col]
-         .nunique()
+        d.groupby("Periodas")[id_col]
+         .size()
          .reset_index(name="Kiekis")
          .sort_values("Periodas")
          .reset_index(drop=True)
@@ -132,12 +122,33 @@ def moving_average(series: pd.Series, window: int) -> pd.Series:
 
 def min_max_date(*dfs):
     """Grąžina min/max datą per pateiktus DF (Data stulpelis)."""
-    dates = pd.concat([d["Data"] for d in dfs if d is not None and "Data" in d.columns], axis=0)
-    dates = pd.to_datetime(dates, errors="coerce").dropna()
+    frames = [d for d in dfs if d is not None and "Data" in d.columns and not d.empty]
+    if not frames:
+        today = pd.Timestamp.today().normalize()
+        return today, today
+    dates = pd.concat([pd.to_datetime(d["Data"], errors="coerce") for d in frames], axis=0)
+    dates = dates.dropna()
     if dates.empty:
         today = pd.Timestamp.today().normalize()
         return today, today
     return dates.min().normalize(), dates.max().normalize()
+
+def aggregate_docs(df: pd.DataFrame, id_col: str) -> pd.DataFrame:
+    """
+    Iš eilutinių duomenų padaro dokumentų lygį: 1 eilutė = 1 dokumentas (pagal id_col).
+    - Data: mažiausia (pirma) pagal dokumentą
+    - Paliekam tik reikalingus laukus (Data, id_col)
+    """
+    if df is None or df.empty or id_col is None:
+        return pd.DataFrame(columns=["Data", id_col])
+    d = df.copy()
+    d["Data"] = pd.to_datetime(d["Data"], errors="coerce")
+    d = d.dropna(subset=["Data", id_col])
+    out = (
+        d.groupby(id_col, as_index=False)["Data"]
+         .min()  # dokumento data – pirmoji (tinka skaičiavimui per periodus)
+    )
+    return out
 
 # ===================== Duomenys iš sesijos =====================
 
@@ -154,7 +165,8 @@ if inv is None:
 # Tipų sanitarija
 frames = [inv] if crn is None else [inv, crn]
 for df in frames:
-    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    if "Data" in df.columns:
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
 
 # ===================== UI: Periodiškumas, slankus, laikotarpis =====================
 
@@ -185,39 +197,50 @@ else:
     nuo, iki = dmin.date(), dmax.date()
 
 # Filtravimas pagal datą
-mask_inv = inv["Data"].dt.date.between(nuo, iki)
+mask_inv = inv["Data"].dt.date.between(nuo, iki) if "Data" in inv.columns else pd.Series(True, index=inv.index)
 inv_f = inv.loc[mask_inv].copy()
 
 crn_f = None
 if crn is not None:
-    mask_crn = crn["Data"].dt.date.between(nuo, iki)
+    mask_crn = crn["Data"].dt.date.between(nuo, iki) if "Data" in crn.columns else pd.Series(True, index=crn.index)
     crn_f = crn.loc[mask_crn].copy()
 
 if inv_f.empty and (crn_f is None or crn_f.empty):
     st.info("Pasirinktame laikotarpyje dokumentų nerasta.")
     st.stop()
 
-# ===================== ID stulpelis =====================
+# ===================== ID stulpelis (griežtas) =====================
 
-id_col_inv = pick_id_column(inv_f)
-id_col_crn = pick_id_column(crn_f) if crn_f is not None and not crn_f.empty else None
+id_col_inv = pick_id_column_strict(inv_f)
+id_col_crn = pick_id_column_strict(crn_f) if crn_f is not None and not crn_f.empty else None
 
-if id_col_inv is None and (crn_f is None or id_col_crn is None):
-    with st.expander("Diagnostika: trūksta dokumento Nr. stulpelio"):
-        st.write("Ieškojau stulpelių: 'Saskaitos_NR', 'SaskaitosNr', 'InvoiceNo', 'Dok_ID', 'Dokumento_Nr' ir kt.")
+if id_col_inv is None:
+    with st.expander("Diagnostika: neradau dokumento Nr. stulpelio INV"):
+        st.write("Ieškojau stulpelių: 'Saskaitos_NR', 'SaskaitosNr', 'InvoiceNo', 'Dokumento_Nr', 'DokumentoNr'.")
         st.write("inv_f stulpeliai:", list(inv_f.columns))
-        if crn_f is not None:
-            st.write("crn_f stulpeliai:", list(crn_f.columns))
-    st.error("Nerastas dokumento numerio stulpelis. Įkėlime naudok A,B,D,F,G schemą arba pervardink į 'Saskaitos_NR'.")
+    st.error("Nerastas INV dokumento numerio stulpelis. Pervardink į 'Saskaitos_NR' arba pridėk vieną iš palaikomų.")
     st.stop()
 
-# ===================== Kiekiai per periodus =====================
+if crn_f is not None and not crn_f.empty and id_col_crn is None:
+    with st.expander("Diagnostika: neradau dokumento Nr. stulpelio CRN"):
+        st.write("Ieškojau stulpelių: 'Saskaitos_NR', 'SaskaitosNr', 'InvoiceNo', 'Dokumento_Nr', 'DokumentoNr'.")
+        st.write("crn_f stulpeliai:", list(crn_f.columns))
+    st.error("Nerastas CRN dokumento numerio stulpelis. Pervardink į 'Saskaitos_NR' arba pridėk vieną iš palaikomų.")
+    st.stop()
 
-inv_cnt = counts(inv_f, id_col_inv, gran) if id_col_inv else pd.DataFrame(columns=["Periodas","Kiekis"])
+# ===================== Kiekiai per periodus (unikalūs dokumentai) =====================
+
+# INV: skaičiuojam pagal dokumento lygį (unikalūs doc ID per periodą)
+inv_docs = aggregate_docs(inv_f, id_col_inv)
+inv_cnt  = counts_unique_docs(inv_docs, id_col_inv, gran)
+
+# CRN: jei yra – pirmiausia agreguojame į dokumentų lygį, tada skaičiuojame
 if crn_f is not None and not crn_f.empty and id_col_crn:
-    crn_cnt = counts(crn_f, id_col_crn, gran)
+    crn_docs = aggregate_docs(crn_f, id_col_crn)
+    crn_cnt  = counts_unique_docs(crn_docs, id_col_crn, gran)
 else:
-    crn_cnt = pd.DataFrame(columns=["Periodas","Kiekis"])
+    crn_docs = pd.DataFrame(columns=["Data", id_col_crn if id_col_crn else "ID"])
+    crn_cnt  = pd.DataFrame(columns=["Periodas","Kiekis"])
 
 # sujungimas
 all_cnt = (
@@ -293,13 +316,15 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ===================== KPI =====================
 
-total_inv = int(inv_cnt["Kiekis"].sum()) if not inv_cnt.empty else 0
-total_crn = int(crn_cnt["Kiekis"].sum()) if not crn_cnt.empty else 0
+# KPI skaičiuojam iš dokumentų lygio (unikalūs), o ne sumą per periodus
+total_inv = int(inv_docs[id_col_inv].nunique()) if not inv_docs.empty else 0
+total_crn = int(crn_docs[id_col_crn].nunique()) if not crn_docs.empty and id_col_crn else 0
+# Grynas/bendras kiekis – skaičiuojam taip pat iš sujungtų per periodus, bet tai informacinė metrika:
 total_net = int(all_cnt["Kiekis"].sum())
 
 k1, k2, k3 = st.columns(3)
-k1.metric("Sąskaitų kiekis", f"{total_inv:,}".replace(",", " "))
-k2.metric("Kreditinių kiekis", f"{total_crn:,}".replace(",", " "))
+k1.metric("Sąskaitų kiekis (unikalūs)", f"{total_inv:,}".replace(",", " "))
+k2.metric("Kreditinių kiekis (unikalūs)", f"{total_crn:,}".replace(",", " "))
 k3.metric(("Grynas kiekis (su minusu)" if crn_negative else "Bendras kiekis (inv+crn)"),
           f"{total_net:,}".replace(",", " "))
 
@@ -318,6 +343,8 @@ with st.expander("🔎 Diagnostika (paspausk jei reikia)"):
     st.write("Naudotas ID (crn):", id_col_crn)
     st.write("inv_f eilutės:", len(inv_f))
     st.write("crn_f eilutės:", 0 if crn_f is None else len(crn_f))
+    st.write("INV dokumentų (unikalūs):", total_inv)
+    st.write("CRN dokumentų (unikalūs):", total_crn)
     st.write("Pirmos inv_f eilutės:")
     st.dataframe(inv_f.head())
     if crn_f is not None and not crn_f.empty:
