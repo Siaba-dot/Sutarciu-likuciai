@@ -60,7 +60,27 @@ def parse_eur_robust(series):
     s = s.str.replace(r'[^0-9\.\-]', '', regex=True)
     return pd.to_numeric(s, errors='coerce')
 
-# Kreditinių suma tiesiai iš F kolonos (6-ta kolona)
+# --- NAUJA: aptikti valiutos stulpelį pagal TURINĮ ir paimti sumas iš stulpelio prieš jį ---
+def detect_currency_col_idx(df: pd.DataFrame, currency: str = "EUR"):
+    """Grąžina stulpelio indeksą, kuriame daugiausia reikšmių lygu currency (pvz. 'EUR'). Jei neranda -> None."""
+    eur_idx, max_cnt = None, -1
+    for i, c in enumerate(df.columns):
+        col = df[c].astype(str).str.strip()
+        cnt = (col == currency).sum()
+        if cnt > max_cnt:
+            eur_idx, max_cnt = i, cnt
+    return eur_idx if max_cnt > 0 else None
+
+def amount_from_prev_to_currency(df: pd.DataFrame, currency: str = "EUR") -> pd.Series:
+    """Jei yra 'EUR' stulpelis, grąžina sumas iš stulpelio prieš jį. Kitu atveju – nuliai."""
+    if df is None or df.empty:
+        return pd.Series([], dtype=float)
+    idx = detect_currency_col_idx(df, currency)
+    if idx is not None and idx - 1 >= 0:
+        return parse_eur_robust(df.iloc[:, idx - 1]).fillna(0.0)
+    return pd.Series([0.0] * len(df), index=df.index, dtype=float)
+
+# (paliekam seną atsarginį variantą – 6-ta kolona/F)
 def amount_from_F(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series([], dtype=float)
@@ -108,7 +128,7 @@ def extract_last_from_notes(text: str) -> str:
 
 # Kreditinių prefiksas (atsarginis filtras, jei nėra „Tipas“)
 CREDIT_PREFIXES = ("COP", "KRE", "AAA")
-CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\\s\\-]*', re.IGNORECASE)
+CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\s\-]*', re.IGNORECASE)
 def is_credit_number(x: str) -> bool:
     return isinstance(x, str) and bool(CREDIT_RE.match(x.strip()))
 
@@ -139,7 +159,7 @@ for df in [inv, crn_raw] if crn_raw is not None else [inv]:
 # Išrašytų sumos (SU PVM)
 inv["Suma_su_PVM"] = parse_eur_robust(inv.get("Suma_su_PVM", inv.get("Suma", 0))).fillna(0.0)
 
-# Kreditinių pasiruošimas (tik jei yra)
+# =================== Kreditinių pasiruošimas (tik jei yra) ===================
 if crn_raw is not None:
     crn = crn_raw.copy()
     # Paliekam TIK kreditines (pagal Tipas; jei nėra – pagal numerį)
@@ -149,10 +169,18 @@ if crn_raw is not None:
     else:
         if "Saskaitos_NR" in crn.columns:
             crn = crn.loc[crn["Saskaitos_NR"].astype(str).apply(is_credit_number)].copy()
-    # Kreditinių suma – TIESIAI iš F kolonos; jei F nėra – bandome pavadintą stulpelį
-    crn["Suma_su_PVM"] = amount_from_F(crn)
+
+    # --- PAGRINDINĖ LOGIKA: sumos iš stulpelio prieš 'EUR' (pagal TURINĮ), nekeisdami išrašytų logikos ---
+    crn["Suma_su_PVM"] = amount_from_prev_to_currency(crn, "EUR")
+
+    # Fallback #1: jei nerado/visos ~0, bandom seną F (6-tą) koloną
+    if (crn["Suma_su_PVM"].abs() < 1e-12).all():
+        crn["Suma_su_PVM"] = amount_from_F(crn)
+
+    # Fallback #2: jei vis dar tuščia – bandome pavadintus stulpelius
     if (crn["Suma_su_PVM"].abs() < 1e-12).all():
         crn["Suma_su_PVM"] = parse_eur_robust(crn.get("Suma_su_PVM", crn.get("Suma", 0))).fillna(0.0)
+
     # Apsauga: kreditinės „SutartiesID“ niekada nenaudojamas pririšimui
     crn["SutartiesID"] = ""
 else:
@@ -272,8 +300,11 @@ out["Like"] = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
 
 # =================== (Pasirinktinai) įtraukti kreditines į sutartis – BETA ===================
 st.divider()
-apply_crn = st.checkbox("✅ Įtraukti kreditines į sutartis (BETA: pririšimas iš Pastabų)", value=False,
-                        help="Iš Pastabų paimama paskutinė VS/AAA/ALFANUM seka. Jei nepavyksta – kreditinė neįtraukiama.")
+apply_crn = st.checkbox(
+    "✅ Įtraukti kreditines į sutartis (BETA: pririšimas iš Pastabų)",
+    value=False,
+    help="Iš Pastabų paimama paskutinė VS/AAA/ALFANUM seka. Jei nepavyksta – kreditinė neįtraukiama."
+)
 
 if apply_crn and crn_f is not None and not crn_f.empty:
     # Raktai inv pusėje: jei numeris turi VS/AAA – imame, kitaip visą numerį (A-Z0-9)
@@ -319,7 +350,6 @@ if apply_crn and crn_f is not None and not crn_f.empty:
     mask_unmatched = work["SutartiesID_inv"].isna() | (work["SutartiesID_inv"].astype(str).str.strip() == "")
     if mask_unmatched.any():
         inv_digits_map = inv_key_unique[["Key_inv_digits", "Klientas_inv", "SutartiesID_inv"]].drop_duplicates(subset=["Key_inv_digits"])
-        # su merge ant poskyrio (išvengiant daugiklio)
         fallback = work.loc[mask_unmatched, ["Key_crn_digits"]].merge(
             inv_digits_map,
             left_on="Key_crn_digits",
@@ -430,7 +460,6 @@ if sel_client and sel_contract:
         st.dataframe(one[show_cols], use_container_width=True)
 
         # Eksportas – tik ši sutartis
-        from io import BytesIO
         buf_one = BytesIO()
         with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
             one[show_cols].to_excel(xw, sheet_name=safe_sheet_name(sel_contract, "Sutartis"), index=False)
