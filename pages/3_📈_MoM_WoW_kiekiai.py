@@ -5,7 +5,6 @@ import numpy as np
 from datetime import date
 import re
 import unicodedata
-
 import plotly.graph_objects as go
 import plotly.io as pio
 
@@ -64,22 +63,17 @@ def find_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
     norm_map = {_norm_colname(c): c for c in df.columns}
     for cand in candidates:
         nc = _norm_colname(cand)
-        if nc in norm_map:
-            return norm_map[nc]
-    # dalinis atitikimas (paskutinis šansas)
+        if nc in norm_map: return norm_map[nc]
+    # dalinis atitikimas
     cols_norm = list(norm_map.keys())
     for cand in candidates:
         nc = _norm_colname(cand)
         hit = [norm_map[k] for k in cols_norm if nc in k]
-        if hit:
-            return hit[0]
+        if hit: return hit[0]
     return None
 
 def pick_id_column_strict(df: pd.DataFrame) -> str | None:
-    """
-    Dokumento numeris (ANTRAŠTĖS lygio).
-    Griežtai NE 'Numeris/No/Dok_ID' (eilutės ID).
-    """
+    """Dokumento numeris (ANTRAŠTĖS lygio). Griežtai NE 'Numeris/No/Dok_ID' (eilutės ID)."""
     prefer = [
         "Saskaitos_NR","Sąskaitos_NR","Saskaitos NR","Sąskaitos NR",
         "Saskaitos numeris","Sąskaitos numeris",
@@ -99,10 +93,9 @@ def pick_date_column(df: pd.DataFrame) -> str | None:
     return find_column(df, prefer)
 
 def coerce_date_col(df: pd.DataFrame, col: str):
-    if df is None or col is None or col not in df.columns:
-        return df
+    if df is None or col is None or col not in df.columns: return df
     d = df.copy()
-    d[col] = pd.to_datetime(d[col], errors="coerce", dayfirst=True)
+    d[col] = pd.to_datetime(d[col], errors="coerce", dayfirst=True)  # LT formatas
     return d
 
 def to_period_series(s: pd.Series, granularity: str) -> pd.Series:
@@ -169,6 +162,16 @@ def counts_unique_docs(doc_df: pd.DataFrame, id_col: str, granularity: str) -> p
          .reset_index(drop=True)
     )
 
+# --- Kritinis: kreditinių prefiksų filtras (dokumentų numeriui) ---
+CREDIT_PREFIX_RE = r'^\s*(?:COP|KRE|AAA)(?:[\s\-]?)'  # leidžiam tarpą/brūkšnį po prefikso
+
+def filter_credit_by_prefix(df: pd.DataFrame, id_col: str) -> pd.DataFrame:
+    if df is None or df.empty or id_col is None or id_col not in df.columns:
+        return pd.DataFrame(columns=df.columns if df is not None else [])
+    s = df[id_col].astype(str).str.upper().str.strip()
+    mask = s.str.match(CREDIT_PREFIX_RE, na=False)
+    return df.loc[mask].copy()
+
 # ------------------------------------------------------------
 # Duomenys iš sesijos
 # ------------------------------------------------------------
@@ -229,16 +232,23 @@ else:
     nuo, iki = dmin.date(), dmax.date()
 
 # ------------------------------------------------------------
-# *** Kritinė pataisa: dokumentų lygis IŠ VISŲ duomenų ***
+# *** Kritiška: CRN filtras pagal prefiksą COP|KRE|AAA ***
+# ------------------------------------------------------------
+if crn_raw is not None and crn_id:
+    crn_raw = filter_credit_by_prefix(crn_raw, crn_id)
+    # Jei po filtro tuščia – nėra kreditinių
+    if crn_raw.empty:
+        crn_raw = None
+
+# ------------------------------------------------------------
+# Dokumentų LYGIO lentelės (iš VISŲ duomenų), tada filtras pagal datą
 # ------------------------------------------------------------
 inv_docs_all = build_doc_level(inv_raw, inv_id, inv_date_col)
 crn_docs_all = build_doc_level(crn_raw, crn_id, crn_date_col) if (crn_raw is not None and crn_id and crn_date_col) else None
 
-# Filtras taikomas DOC lygiui (NE eilutėms) – nebesumigravęs į 2026‑01
+# Filtras taikomas DOC lygiui (NE eilutėms) – nebesumigravęs į „sausį“
 inv_docs = inv_docs_all.loc[inv_docs_all["Data"].dt.date.between(nuo, iki)].copy()
-crn_docs = None
-if crn_docs_all is not None and not crn_docs_all.empty:
-    crn_docs = crn_docs_all.loc[crn_docs_all["Data"].dt.date.between(nuo, iki)].copy()
+crn_docs = crn_docs_all.loc[crn_docs_all["Data"].dt.date.between(nuo, iki)].copy() if crn_docs_all is not None else None
 
 if inv_docs.empty and (crn_docs is None or crn_docs.empty):
     st.info("Pasirinktame laikotarpyje dokumentų nerasta.")
@@ -248,11 +258,7 @@ if inv_docs.empty and (crn_docs is None or crn_docs.empty):
 # Kiekiai per periodus (unikalūs dokumentai)
 # ------------------------------------------------------------
 inv_cnt = counts_unique_docs(inv_docs.rename(columns={inv_id: "DOC_ID"}), "DOC_ID", gran)
-
-if crn_docs is not None and not crn_docs.empty:
-    crn_cnt = counts_unique_docs(crn_docs.rename(columns={crn_id: "DOC_ID"}), "DOC_ID", gran)
-else:
-    crn_cnt = pd.DataFrame(columns=["Periodas", "Kiekis"])
+crn_cnt = counts_unique_docs(crn_docs.rename(columns={crn_id: "DOC_ID"}), "DOC_ID", gran) if (crn_docs is not None and not crn_docs.empty) else pd.DataFrame(columns=["Periodas","Kiekis"])
 
 all_cnt = (
     pd.merge(inv_cnt, crn_cnt, how="outer", on="Periodas", suffixes=("_inv", "_crn"))
@@ -302,14 +308,17 @@ k2.metric("Kreditinių kiekis (unikalūs)", f"{total_crn:,}".replace(",", " "))
 k3.metric(("Grynas kiekis (su minusu)" if crn_negative else "Bendras kiekis (inv+crn)"), f"{total_net:,}".replace(",", " "))
 
 # ------------------------------------------------------------
-# Diagnostika
+# Diagnostika – kad užmuštume klaidą vietoje
 # ------------------------------------------------------------
 with st.expander("🔎 Diagnostika (paspausk jei reikia)"):
     st.write("Laikotarpis:", f"{nuo} – {iki}")
-    st.write("INV ID stulpelis:", inv_id, " • INV DATA stulpelis:", inv_date_col)
-    st.write("CRN ID stulpelis:", crn_id, " • CRN DATA stulpelis:", crn_date_col)
-    st.write("INV dokumentų lygio eilutės:", 0 if inv_docs_all is None else len(inv_docs_all))
+    st.write("INV ID:", inv_id, "| INV DATA:", inv_date_col, "| INV doc #:", len(inv_docs_all))
+    st.write("CRN ID:", crn_id, "| CRN DATA:", crn_date_col, "| CRN doc # (po prefikso filtro):", 0 if crn_docs_all is None else len(crn_docs_all))
+    if crn_raw is not None and crn_id in crn_raw.columns:
+        # parodyti top prefiksus pačiam pasitikrinti
+        pref = crn_raw[crn_id].astype(str).str.upper().str.strip().str.extract(r'^([A-Z]+)')[0].value_counts().head(10)
+        st.write("CRN prefiksų TOP (po filtro COP|KRE|AAA):")
+        st.dataframe(pref)
     if crn_docs_all is not None:
-        st.write("CRN dokumentų lygio eilutės:", len(crn_docs_all))
-        st.write("CRN mėnesių skirstinys (iš VISŲ duomenų):")
+        st.write("CRN mėnesių skirstinys (iš VISŲ duomenų po prefikso filtro):")
         st.dataframe(crn_docs_all.assign(M=lambda d: d["Data"].dt.to_period("M").astype(str)).M.value_counts().sort_index())
