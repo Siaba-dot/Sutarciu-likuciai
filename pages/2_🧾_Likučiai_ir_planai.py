@@ -11,12 +11,15 @@ st.set_page_config(layout="wide")
 st.markdown("## 🧾 Išrašytos ir kreditinės sąskaitos (SU PVM) – planai ir likučiai")
 
 # Kompaktesnis išdėstymas
-st.markdown("""
+st.markdown(
+    """
 <style>
 section.main > div { padding-top: 0rem; }
 .block-container { padding-top: 0.5rem; padding-bottom: 0.75rem; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # =================== Pagalbinės ===================
 def floor2(x):
@@ -52,41 +55,118 @@ def parse_eur_robust(series):
     if series is None:
         return pd.Series(dtype=float)
     s = series.astype(str)
-    s = s.str.replace('\u2212', '-', regex=False)  # minus U+2212 -> '-'
-    s = s.str.replace('\u00A0', '', regex=False)   # NBSP lauk
-    s = s.str.replace(' ', '', regex=False)        # tarpai lauk
-    s = s.str.replace('€', '', regex=False)        # valiuta lauk
-    s = s.str.replace(',', '.', regex=False)       # kablelis -> taškas
-    s = s.str.replace(r'[^0-9\.\-]', '', regex=True)
-    return pd.to_numeric(s, errors='coerce')
+    s = s.str.replace("\u2212", "-", regex=False)  # minus U+2212 -> '-'
+    s = s.str.replace("\u00A0", "", regex=False)   # NBSP lauk
+    s = s.str.replace(" ", "", regex=False)        # tarpai lauk
+    s = s.str.replace("€", "", regex=False)        # valiuta lauk
+    s = s.str.replace(",", ".", regex=False)       # kablelis -> taškas
+    s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
+    return pd.to_numeric(s, errors="coerce")
 
-# --- NAUJA: aptikti valiutos stulpelį pagal TURINĮ ir paimti sumas iš stulpelio prieš jį ---
-def detect_currency_col_idx(df: pd.DataFrame, currency: str = "EUR"):
-    """Grąžina stulpelio indeksą, kuriame daugiausia reikšmių lygu currency (pvz. 'EUR'). Jei neranda -> None."""
-    eur_idx, max_cnt = None, -1
-    for i, c in enumerate(df.columns):
-        col = df[c].astype(str).str.strip()
-        cnt = (col == currency).sum()
-        if cnt > max_cnt:
-            eur_idx, max_cnt = i, cnt
-    return eur_idx if max_cnt > 0 else None
-
-def amount_from_prev_to_currency(df: pd.DataFrame, currency: str = "EUR") -> pd.Series:
-    """Jei yra 'EUR' stulpelis, grąžina sumas iš stulpelio prieš jį. Kitu atveju – nuliai."""
-    if df is None or df.empty:
-        return pd.Series([], dtype=float)
-    idx = detect_currency_col_idx(df, currency)
-    if idx is not None and idx - 1 >= 0:
-        return parse_eur_robust(df.iloc[:, idx - 1]).fillna(0.0)
-    return pd.Series([0.0] * len(df), index=df.index, dtype=float)
-
-# (paliekam seną atsarginį variantą – 6-ta kolona/F)
+# 6-ta kolona (F) – kaip atsarginis variantas
 def amount_from_F(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series([], dtype=float)
     if df.shape[1] >= 6:
         return parse_eur_robust(df.iloc[:, 5]).fillna(0.0)
     return pd.Series([0.0] * len(df), index=df.index, dtype=float)
+
+# --- EUR stulpelio aptikimas pagal PAVADINIMĄ (header) ---
+def detect_currency_col_idx_headers(df: pd.DataFrame, currency: str = "EUR"):
+    """Grąžina stulpelio indeksą, jei tarp df.columns yra 'EUR'. Kitaip None."""
+    try:
+        cols = list(df.columns)
+        eur_idx = cols.index(currency)
+        return eur_idx
+    except ValueError:
+        return None
+
+# --- EUR stulpelio aptikimas pagal TURINĮ (langelių reikšmes) ---
+def detect_currency_col_idx_content(df: pd.DataFrame, currency: str = "EUR"):
+    """
+    Grąžina tą stulpelio indeksą, kuriame daugiausia langelių lygu 'EUR' (kaip reikšmė turinyje).
+    Jei nė viename stulpelyje nėra 'EUR' – grąžina None.
+    """
+    best_idx, best_count = None, -1
+    for i, c in enumerate(df.columns):
+        col = df[c].astype(str).str.strip()
+        cnt = (col == currency).sum()
+        if cnt > best_count:
+            best_idx, best_count = i, cnt
+    return best_idx if best_count > 0 else None
+
+# --- Tavo prašyta logika: SUMOS = stulpelis prieš 'EUR' ---
+def credit_amounts_by_header_logic(df: pd.DataFrame) -> pd.Series:
+    """
+    1) 'EUR' kaip antraštė: imame stulpelį prieš 'EUR'
+    2) Jei nerandam – kaimynystės patikra (cols[i+1] == 'EUR' ir esamas skaitinis)
+    3) Jei nepavyko – grąžinam nulius (tolesni fallback'ai vykdomi kitur)
+    """
+    if df is None or df.empty:
+        return pd.Series([], dtype=float)
+
+    cols = list(df.columns)
+    amount_col = None
+
+    # 1) Tikrinam, ar tarp antraščių yra 'EUR'
+    eur_idx = detect_currency_col_idx_headers(df, "EUR")
+    if eur_idx is not None and eur_idx - 1 >= 0:
+        amount_col = cols[eur_idx - 1]
+    else:
+        # 2) Kaimynystė (jei 'EUR' ne kaip antraštė)
+        for i in range(len(cols) - 1):
+            if cols[i + 1] == "EUR" and pd.api.types.is_numeric_dtype(df[cols[i]]):
+                amount_col = cols[i]
+                break
+
+    if amount_col is None:
+        return pd.Series(0.0, index=df.index, dtype=float)
+
+    # Konvertuojam į skaičių; jeigu stulpelis jau numerinis – tiesiog to_numeric
+    if pd.api.types.is_numeric_dtype(df[amount_col]):
+        return pd.to_numeric(df[amount_col], errors="coerce").fillna(0.0)
+    else:
+        return parse_eur_robust(df[amount_col]).fillna(0.0)
+
+# --- „Universalus“ sumų nustatymas kreditinėms, nekeičiat išrašytų logikos ---
+def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
+    """
+    Prioritetų seka:
+      (A) Jei jau yra pavadinti stulpeliai – 'Suma_su_PVM' arba 'Suma'
+      (B) Tavo logika: 'EUR' kaip antraštė ir imame stulpelį prieš jį
+      (C) 'EUR' kaip TURINYS (langeliuose), imame stulpelį prieš jį
+      (D) 6-ta kolona (F)
+      (E) Visiškai fallback – nulis
+    """
+    if df is None or df.empty:
+        return pd.Series([], dtype=float)
+
+    # (A) – pavadinti stulpeliai
+    for col in ["Suma_su_PVM", "Suma", "SUM SU PVM", "SUM"]:
+        if col in df.columns:
+            s = parse_eur_robust(df[col]).fillna(0.0)
+            if s.abs().sum() > 0:
+                return s
+
+    # (B) – tavo „stulpelis prieš EUR (header)“ logika
+    s = credit_amounts_by_header_logic(df)
+    if s.abs().sum() > 0:
+        return s
+
+    # (C) – EUR kaip turinys (ne antraštė)
+    eur_idx = detect_currency_col_idx_content(df, "EUR")
+    if eur_idx is not None and eur_idx - 1 >= 0:
+        s = parse_eur_robust(df.iloc[:, eur_idx - 1]).fillna(0.0)
+        if s.abs().sum() > 0:
+            return s
+
+    # (D) – 6-ta kolona
+    s = amount_from_F(df)
+    if s.abs().sum() > 0:
+        return s
+
+    # (E) – nulis
+    return pd.Series(0.0, index=df.index, dtype=float)
 
 # Raktų normalizavimas (BETA susiejimui)
 def norm_alnum(x: str) -> str:
@@ -112,15 +192,18 @@ def extract_last_from_notes(text: str) -> str:
     """
     if pd.isna(text):
         return ""
-    s = str(text).upper().replace('\u00A0', ' ')
+    s = str(text).upper().replace("\u00A0", " ")
     candidates = []
 
-    vs = re.findall(r'(VS[^\s]*)', s)
-    if vs: candidates.extend(vs)
-    aaa = re.findall(r'(AAA[^\s]*)', s)
-    if aaa: candidates.extend(aaa)
-    alnum = re.findall(r'([A-Z0-9][A-Z0-9\-/]*\d[A-Z0-9\-/]*)', s)
-    if alnum: candidates.extend(alnum)
+    vs = re.findall(r"(VS[^\s]*)", s)
+    if vs:
+        candidates.extend(vs)
+    aaa = re.findall(r"(AAA[^\s]*)", s)
+    if aaa:
+        candidates.extend(aaa)
+    alnum = re.findall(r"([A-Z0-9][A-Z0-9\-/]*\d[A-Z0-9\-/]*)", s)
+    if alnum:
+        candidates.extend(alnum)
 
     if not candidates:
         return ""
@@ -128,7 +211,7 @@ def extract_last_from_notes(text: str) -> str:
 
 # Kreditinių prefiksas (atsarginis filtras, jei nėra „Tipas“)
 CREDIT_PREFIXES = ("COP", "KRE", "AAA")
-CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\s\-]*', re.IGNORECASE)
+CREDIT_RE = re.compile(r"^(?:" + "|".join(CREDIT_PREFIXES) + r")[\s\-]*", re.IGNORECASE)
 def is_credit_number(x: str) -> bool:
     return isinstance(x, str) and bool(CREDIT_RE.match(x.strip()))
 
@@ -156,12 +239,13 @@ for df in [inv, crn_raw] if crn_raw is not None else [inv]:
     else:
         df["SutartiesID"] = df["SutartiesID"].apply(lambda v: "" if pd.isna(v) else str(v)).str.strip()
 
-# Išrašytų sumos (SU PVM)
+# Išrašytų sumos (SU PVM) – NEKEIČIAM LOGIKOS
 inv["Suma_su_PVM"] = parse_eur_robust(inv.get("Suma_su_PVM", inv.get("Suma", 0))).fillna(0.0)
 
-# =================== Kreditinių pasiruošimas (tik jei yra) ===================
+# =================== Kreditinių pasiruošimas (PAGRINDAS: stulpelis prieš 'EUR') ===================
 if crn_raw is not None:
     crn = crn_raw.copy()
+
     # Paliekam TIK kreditines (pagal Tipas; jei nėra – pagal numerį)
     if "Tipas" in crn.columns:
         mask_credit = crn["Tipas"].astype(str).str.lower().str.contains("kredit")
@@ -170,16 +254,8 @@ if crn_raw is not None:
         if "Saskaitos_NR" in crn.columns:
             crn = crn.loc[crn["Saskaitos_NR"].astype(str).apply(is_credit_number)].copy()
 
-    # --- PAGRINDINĖ LOGIKA: sumos iš stulpelio prieš 'EUR' (pagal TURINĮ), nekeisdami išrašytų logikos ---
-    crn["Suma_su_PVM"] = amount_from_prev_to_currency(crn, "EUR")
-
-    # Fallback #1: jei nerado/visos ~0, bandom seną F (6-tą) koloną
-    if (crn["Suma_su_PVM"].abs() < 1e-12).all():
-        crn["Suma_su_PVM"] = amount_from_F(crn)
-
-    # Fallback #2: jei vis dar tuščia – bandome pavadintus stulpelius
-    if (crn["Suma_su_PVM"].abs() < 1e-12).all():
-        crn["Suma_su_PVM"] = parse_eur_robust(crn.get("Suma_su_PVM", crn.get("Suma", 0))).fillna(0.0)
+    # --- ČIA SVARBIAUSIA DALIS: sumas nustatome pagal 'EUR' vietą ---
+    crn["Suma_su_PVM"] = compute_credit_amounts(crn).astype(float).fillna(0.0)
 
     # Apsauga: kreditinės „SutartiesID“ niekada nenaudojamas pririšimui
     crn["SutartiesID"] = ""
@@ -264,6 +340,7 @@ st.subheader("💳 Kreditinės (SU PVM) – be susiejimo")
 if crn_f is None or crn_f.empty:
     st.info("Pasirinktame laikotarpyje **kreditinių nėra**.")
     total_kred = 0.0
+    cols_crn = []
 else:
     # Skaičiai rodymui – nukerpam be apvalinimo
     crn_f["Suma_su_PVM"] = crn_f["Suma_su_PVM"].astype(float).fillna(0.0).apply(floor2)
@@ -271,8 +348,8 @@ else:
 
     cols_crn = [c for c in ["Data", "Saskaitos_NR", "Klientas", "Pastabos", "Suma_su_PVM", "Tipas"] if c in crn_f.columns]
     st.dataframe(
-        crn_f[cols_crn].sort_values(["Data","Saskaitos_NR"]) if "Data" in cols_crn else crn_f[cols_crn],
-        use_container_width=True
+        crn_f[cols_crn].sort_values(["Data", "Saskaitos_NR"]) if "Data" in cols_crn else crn_f[cols_crn],
+        use_container_width=True,
     )
 
 c1, c2 = st.columns(2)
@@ -303,7 +380,7 @@ st.divider()
 apply_crn = st.checkbox(
     "✅ Įtraukti kreditines į sutartis (BETA: pririšimas iš Pastabų)",
     value=False,
-    help="Iš Pastabų paimama paskutinė VS/AAA/ALFANUM seka. Jei nepavyksta – kreditinė neįtraukiama."
+    help="Iš Pastabų paimama paskutinė VS/AAA/ALFANUM seka. Jei nepavyksta – kreditinė neįtraukiama.",
 )
 
 if apply_crn and crn_f is not None and not crn_f.empty:
@@ -315,9 +392,10 @@ if apply_crn and crn_f is not None and not crn_f.empty:
     )
 
     def extract_from_number(nr: str) -> str:
-        if pd.isna(nr): return ""
+        if pd.isna(nr):
+            return ""
         s = str(nr).upper()
-        m = re.search(r'(VS[^\s]+)$', s) or re.search(r'(AAA[^\s]+)$', s)
+        m = re.search(r"(VS[^\s]+)$", s) or re.search(r"(AAA[^\s]+)$", s)
         return norm_alnum(m.group(1)) if m else norm_alnum(s)
 
     inv_key["Key_inv_best"] = inv_key["Saskaitos_NR"].apply(extract_from_number)
@@ -328,9 +406,9 @@ if apply_crn and crn_f is not None and not crn_f.empty:
     inv_key = inv_key.sort_values(["Data", "Saskaitos_NR"])
     inv_key = inv_key[inv_key["Key_inv_best"].astype(str).str.strip() != ""].copy()
     inv_key_unique = (
-        inv_key
-        .drop_duplicates(subset=["Key_inv_best"], keep="last")
-        [["Key_inv_best", "Key_inv_digits", "Klientas_inv", "SutartiesID_inv"]]
+        inv_key.drop_duplicates(subset=["Key_inv_best"], keep="last")[
+            ["Key_inv_best", "Key_inv_digits", "Klientas_inv", "SutartiesID_inv"]
+        ]
     )
 
     # Kreditinėms – raktas iš Pastabų
@@ -349,12 +427,11 @@ if apply_crn and crn_f is not None and not crn_f.empty:
     # 2) fallback jungimas – tik skaitmenimis
     mask_unmatched = work["SutartiesID_inv"].isna() | (work["SutartiesID_inv"].astype(str).str.strip() == "")
     if mask_unmatched.any():
-        inv_digits_map = inv_key_unique[["Key_inv_digits", "Klientas_inv", "SutartiesID_inv"]].drop_duplicates(subset=["Key_inv_digits"])
+        inv_digits_map = inv_key_unique[["Key_inv_digits", "Klientas_inv", "SutartiesID_inv"]].drop_duplicates(
+            subset=["Key_inv_digits"]
+        )
         fallback = work.loc[mask_unmatched, ["Key_crn_digits"]].merge(
-            inv_digits_map,
-            left_on="Key_crn_digits",
-            right_on="Key_inv_digits",
-            how="left"
+            inv_digits_map, left_on="Key_crn_digits", right_on="Key_inv_digits", how="left"
         )
         work.loc[mask_unmatched, "Klientas_inv"] = fallback["Klientas_inv"].values
         work.loc[mask_unmatched, "SutartiesID_inv"] = fallback["SutartiesID_inv"].values
@@ -372,7 +449,13 @@ if apply_crn and crn_f is not None and not crn_f.empty:
         work_ok.groupby(["Klientas_final", "SutartiesID_final"], dropna=False)["Kredituota_pos"]
         .sum()
         .reset_index()
-        .rename(columns={"Klientas_final": "Klientas", "SutartiesID_final": "SutartiesID", "Kredituota_pos": "Kredituota"})
+        .rename(
+            columns={
+                "Klientas_final": "Klientas",
+                "SutartiesID_final": "SutartiesID",
+                "Kredituota_pos": "Kredituota",
+            }
+        )
     )
 
     # Į Likučius: sujungiame „Kredituota“ ir perskaičiuojame Faktą
@@ -413,9 +496,15 @@ out["PctIsnaudota"] = out["PctIsnaudota"].clip(lower=0, upper=999)
 out["Progresas"] = out["PctIsnaudota"].apply(progress_bar)
 
 cols_order = [
-    "Klientas", "SutartiesID", "SutartiesPlanas",
-    "Israsyta", "Kredituota", "Faktas", "Like",
-    "PctIsnaudota", "Progresas"
+    "Klientas",
+    "SutartiesID",
+    "SutartiesPlanas",
+    "Israsyta",
+    "Kredituota",
+    "Faktas",
+    "Like",
+    "PctIsnaudota",
+    "Progresas",
 ]
 show_cols = [c for c in cols_order if c in out.columns]
 st.dataframe(out[show_cols].sort_values(["Klientas", "SutartiesID"]), use_container_width=True)
@@ -433,8 +522,7 @@ sel_client = st.selectbox("Pasirink Klientą", options=klientai, index=0 if klie
 sutartys = []
 if sel_client:
     sutartys = sorted(
-        sel_df.loc[sel_df["Klientas"] == sel_client, "SutartiesID"]
-        .dropna().astype(str).str.strip().unique().tolist()
+        sel_df.loc[sel_df["Klientas"] == sel_client, "SutartiesID"].dropna().astype(str).str.strip().unique().tolist()
     )
 sel_contract = st.selectbox("Pasirink Sutartį", options=sutartys, index=0 if sutartys else None)
 
@@ -478,7 +566,7 @@ with pd.ExcelWriter(buf_all, engine="openpyxl") as xw:
     out[show_cols].to_excel(xw, sheet_name="Sutarciu_likuciai_SU_PVM", index=False)
     inv_f.to_excel(xw, sheet_name="Saskaitos_ISRASYTA_SU_PVM", index=False)
     if crn_f is not None and not crn_f.empty:
-        cols_crn = [c for c in ["Data","Saskaitos_NR","Klientas","Pastabos","Suma_su_PVM","Tipas"] if c in crn_f.columns]
+        cols_crn = [c for c in ["Data", "Saskaitos_NR", "Klientas", "Pastabos", "Suma_su_PVM", "Tipas"] if c in crn_f.columns]
         crn_f[cols_crn].to_excel(xw, sheet_name="Kreditines_SU_PVM", index=False)
 
 st.download_button(
