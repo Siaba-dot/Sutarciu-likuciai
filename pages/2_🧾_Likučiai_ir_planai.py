@@ -11,15 +11,12 @@ st.set_page_config(layout="wide")
 st.markdown("## 🧾 Išrašytos ir kreditinės sąskaitos (SU PVM) – planai ir likučiai")
 
 # Kompaktesnis išdėstymas
-st.markdown(
-    """
+st.markdown("""
 <style>
 section.main > div { padding-top: 0rem; }
 .block-container { padding-top: 0.5rem; padding-bottom: 0.75rem; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 # =================== Pagalbinės ===================
 def floor2(x):
@@ -55,13 +52,13 @@ def parse_eur_robust(series):
     if series is None:
         return pd.Series(dtype=float)
     s = series.astype(str)
-    s = s.str.replace("\u2212", "-", regex=False)  # minus U+2212 -> '-'
-    s = s.str.replace("\u00A0", "", regex=False)   # NBSP lauk
-    s = s.str.replace(" ", "", regex=False)        # tarpai lauk
-    s = s.str.replace("€", "", regex=False)        # valiuta lauk
-    s = s.str.replace(",", ".", regex=False)       # kablelis -> taškas
-    s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
-    return pd.to_numeric(s, errors="coerce")
+    s = s.str.replace('\u2212', '-', regex=False)  # minus U+2212 -> '-'
+    s = s.str.replace('\u00A0', '', regex=False)   # NBSP lauk
+    s = s.str.replace(' ', '', regex=False)        # tarpai lauk
+    s = s.str.replace('€', '', regex=False)        # valiuta lauk
+    s = s.str.replace(',', '.', regex=False)       # kablelis -> taškas
+    s = s.str.replace(r'[^0-9\.\-]', '', regex=True)
+    return pd.to_numeric(s, errors='coerce')
 
 # 6-ta kolona (F) – kaip atsarginis variantas
 def amount_from_F(df: pd.DataFrame) -> pd.Series:
@@ -102,7 +99,7 @@ def credit_amounts_by_header_logic(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series([], dtype=float)
 
-    cols_orig, cols_norm = normalize_headers(df)
+    _, cols_norm = normalize_headers(df)
     amount_idx = None
 
     eur_idx = detect_currency_col_idx_headers(df, "EUR")
@@ -121,7 +118,7 @@ def credit_amounts_by_header_logic(df: pd.DataFrame) -> pd.Series:
         return pd.Series(0.0, index=df.index, dtype=float)
     return parse_eur_robust(df.iloc[:, amount_idx]).fillna(0.0)
 
-# --- „Universalus“ sumų nustatymas kreditinėms, nekeičiat išrašytų logikos ---
+# --- „Universalus“ sumų nustatymas kreditinėms ---
 def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
     """
     Prioritetų seka:
@@ -135,33 +132,33 @@ def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series([], dtype=float)
 
-    # (A) – pavadinti stulpeliai
+    # (A)
     for col in ["Suma_su_PVM", "Suma", "SUM SU PVM", "SUM"]:
         if col in df.columns:
             s = parse_eur_robust(df[col]).fillna(0.0)
             if s.abs().sum() > 0:
                 return s
 
-    # (B) – tavo „stulpelis prieš EUR (header)“ logika (normalizuota)
+    # (B)
     s = credit_amounts_by_header_logic(df)
     if s.abs().sum() > 0:
         return s
 
-    # (C) – EUR kaip turinys (ne antraštė), case-insensitive
+    # (C)
     eur_idx = detect_currency_col_idx_content(df, "EUR")
     if eur_idx is not None and eur_idx - 1 >= 0:
         s = parse_eur_robust(df.iloc[:, eur_idx - 1]).fillna(0.0)
         if s.abs().sum() > 0:
             return s
 
-    # (D) – 6-ta kolona
+    # (D)
     s = amount_from_F(df)
     if s.abs().sum() > 0:
         return s
 
-    # (E) – HEURISTIKA: rinktis „pinigų“ stulpelį
+    # (E)
     best_series = None
-    best_score = (-1, -1.0)  # (non_null_count, median_abs)
+    best_score = (-1, -1.0)
     skip = {"DATA", "PASTABOS", "KLIENTAS", "SASKAITOS_NR", "TIPAS"}
     _, cols_norm = normalize_headers(df)
     for i, c in enumerate(df.columns):
@@ -182,10 +179,10 @@ def compute_credit_amounts(df: pd.DataFrame) -> pd.Series:
     if best_series is not None:
         return best_series.fillna(0.0)
 
-    # (F) – nulis
+    # (F)
     return pd.Series(0.0, index=df.index, dtype=float)
 
-# Raktų normalizavimas (BETA susiejimui)
+# Raktų normalizavimas
 def norm_alnum(x: str) -> str:
     if pd.isna(x):
         return ""
@@ -209,26 +206,21 @@ def extract_last_from_notes(text: str) -> str:
     """
     if pd.isna(text):
         return ""
-    s = str(text).upper().replace("\u00A0", " ")
+    s = str(text).upper().replace('\u00A0', ' ')
     candidates = []
-
-    vs = re.findall(r"(VS[^\s]*)", s)
-    if vs:
-        candidates.extend(vs)
-    aaa = re.findall(r"(AAA[^\s]*)", s)
-    if aaa:
-        candidates.extend(aaa)
-    alnum = re.findall(r"([A-Z0-9][A-Z0-9\-/]*\d[A-Z0-9\-/]*)", s)
-    if alnum:
-        candidates.extend(alnum)
-
+    vs = re.findall(r'(VS[^\s]*)', s)
+    if vs: candidates.extend(vs)
+    aaa = re.findall(r'(AAA[^\s]*)', s)
+    if aaa: candidates.extend(aaa)
+    alnum = re.findall(r'([A-Z0-9][A-Z0-9\-/]*\d[A-Z0-9\-/]*)', s)
+    if alnum: candidates.extend(alnum)
     if not candidates:
         return ""
     return norm_alnum(candidates[-1])
 
 # Kreditinių prefiksas (atsarginis filtras, jei nėra „Tipas“)
 CREDIT_PREFIXES = ("COP", "KRE", "AAA")
-CREDIT_RE = re.compile(r"^(?:" + "|".join(CREDIT_PREFIXES) + r")[\s\-]*", re.IGNORECASE)
+CREDIT_RE = re.compile(r'^(?:' + '|'.join(CREDIT_PREFIXES) + r')[\s\-]*', re.IGNORECASE)
 def is_credit_number(x: str) -> bool:
     return isinstance(x, str) and bool(CREDIT_RE.match(x.strip()))
 
@@ -255,25 +247,19 @@ for df in [inv, crn_raw] if crn_raw is not None else [inv]:
     else:
         df["SutartiesID"] = df["SutartiesID"].apply(lambda v: "" if pd.isna(v) else str(v)).str.strip()
 
-# Išrašytų sumos (SU PVM) – NEKEIČIAM LOGIKOS
+# Išrašytų sumos (SU PVM)
 inv["Suma_su_PVM"] = parse_eur_robust(inv.get("Suma_su_PVM", inv.get("Suma", 0))).fillna(0.0)
 
-# =================== Kreditinių pasiruošimas (PAGRINDAS: stulpelis prieš 'EUR') ===================
+# Kreditinių pasiruošimas (sumos ir filtrai)
 if crn_raw is not None:
     crn = crn_raw.copy()
-
-    # Paliekam TIK kreditines (pagal Tipas; jei nėra – pagal numerį)
     if "Tipas" in crn.columns:
         mask_credit = crn["Tipas"].astype(str).str.lower().str.contains("kredit")
         crn = crn.loc[mask_credit].copy()
     else:
         if "Saskaitos_NR" in crn.columns:
             crn = crn.loc[crn["Saskaitos_NR"].astype(str).apply(is_credit_number)].copy()
-
-    # --- SUMOS: robusti „prieš EUR“ logika + fallback'ai + heuristika ---
     crn["Suma_su_PVM"] = compute_credit_amounts(crn).astype(float).fillna(0.0)
-
-    # Apsauga: kreditinės „SutartiesID“ niekada nenaudojamas pririšimui
     crn["SutartiesID"] = ""
 else:
     crn = None
@@ -305,7 +291,7 @@ if crn is not None:
 else:
     crn_f = None
 
-# =================== Skiltis: Išrašytos sąskaitos (kaip anksčiau) ===================
+# =================== Išrašytos sąskaitos ===================
 st.divider()
 st.subheader("📄 Išrašytos sąskaitos (SU PVM)")
 
@@ -348,7 +334,7 @@ plans["Klientas"] = plans["Klientas"].astype(str).str.strip()
 plans["SutartiesID"] = plans["SutartiesID"].astype(str).str.strip()
 st.session_state["plans"] = plans
 
-# =================== Skiltis: Kreditinių sąrašas (be susiejimo) ===================
+# =================== Kreditinių sąrašas (be susiejimo) ===================
 st.divider()
 st.subheader("💳 Kreditinės (SU PVM) – be susiejimo")
 
@@ -359,117 +345,89 @@ if crn_f is None or crn_f.empty:
 else:
     crn_f["Suma_su_PVM"] = crn_f["Suma_su_PVM"].astype(float).fillna(0.0).apply(floor2)
     total_kred = float(crn_f["Suma_su_PVM"].sum())
-
     cols_crn = [c for c in ["Data", "Saskaitos_NR", "Klientas", "Pastabos", "Suma_su_PVM", "Tipas"] if c in crn_f.columns]
     st.dataframe(
-        crn_f[cols_crn].sort_values(["Data", "Saskaitos_NR"]) if "Data" in cols_crn else crn_f[cols_crn],
-        use_container_width=True,
+        crn_f[cols_crn].sort_values(["Data","Saskaitos_NR"]) if "Data" in cols_crn else crn_f[cols_crn],
+        use_container_width=True
     )
 
 c1, c2 = st.columns(2)
 c1.metric("Kreditinių kiekis", "0" if crn_f is None else f"{len(crn_f)}")
 c2.metric("Kreditinių suma (SU PVM)", f"{total_kred:,.2f} €")
 
-# Atsisiuntimas – kreditinių sąrašas
-buf_crn = BytesIO()
-if crn_f is not None and not crn_f.empty:
-    with pd.ExcelWriter(buf_crn, engine="openpyxl") as xw:
-        crn_f[cols_crn].to_excel(xw, sheet_name=safe_sheet_name("Kreditines_SU_PVM"), index=False)
-    st.download_button(
-        "⬇️ Atsisiųsti kreditinių sąrašą (.xlsx)",
-        data=buf_crn.getvalue(),
-        file_name=f"kreditines_SU_PVM__{nuo}_{iki}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-# =================== Likučių skaičiavimas iš Išrašytų (be kreditinių) ===================
-out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
-out["Israsyta"] = out["Israsyta"].apply(floor2)
-out["Faktas"] = out["Israsyta"]  # kol kas be kreditinių
-out["Like"] = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
-
-# =================== (Pasirinktinai) įtraukti kreditines į sutartis – BETA ===================
+# =================== Likutis pagal sutartį (automatinis pririšimas per išrašytą sąskaitą) ===================
 st.divider()
-apply_crn = st.checkbox(
-    "✅ Įtraukti kreditines į sutartis (BETA: pririšimas iš Pastabų)",
-    value=False,
-    help="Iš Pastabų paimama paskutinė VS/AAA/ALFANUM seka. Jei nepavyksta – kreditinė neįtraukiama.",
+st.subheader("🔗 Kreditinių pririšimas prie sutarčių (per išrašytos sąskaitos numerį)")
+
+# 1) Raktas iš IŠRAŠYTŲ sąskaitų numerio (VS..., AAA..., arba pats numeris)
+inv_key = (
+    inv[["Data", "Saskaitos_NR", "Klientas", "SutartiesID"]]
+    .dropna(subset=["Saskaitos_NR"])
+    .copy()
 )
 
-if apply_crn and crn_f is not None and not crn_f.empty:
-    inv_key = (
-        inv[["Data", "Saskaitos_NR", "Klientas", "SutartiesID"]]
-        .dropna(subset=["Saskaitos_NR"])
-        .copy()
-    )
+def extract_from_number(nr: str) -> str:
+    if pd.isna(nr): return ""
+    s = str(nr).upper()
+    m = re.search(r'(VS[^\s]+)$', s) or re.search(r'(AAA[^\s]+)$', s)
+    return norm_alnum(m.group(1)) if m else norm_alnum(s)
 
-    def extract_from_number(nr: str) -> str:
-        if pd.isna(nr):
-            return ""
-        s = str(nr).upper()
-        m = re.search(r"(VS[^\s]+)$", s) or re.search(r"(AAA[^\s]+)$", s)
-        return norm_alnum(m.group(1)) if m else norm_alnum(s)
+inv_key["Key_inv_best"] = inv_key["Saskaitos_NR"].apply(extract_from_number)
+inv_key = inv_key.rename(columns={"Klientas": "Klientas_inv", "SutartiesID": "SutartiesID_inv"})
+inv_key = inv_key.sort_values(["Data", "Saskaitos_NR"])
+inv_key = inv_key[inv_key["Key_inv_best"].astype(str).str.strip() != ""].copy()
+inv_key_unique = (
+    inv_key.drop_duplicates(subset=["Key_inv_best"], keep="last")
+           [["Key_inv_best", "Klientas_inv", "SutartiesID_inv"]]
+)
 
-    inv_key["Key_inv_best"] = inv_key["Saskaitos_NR"].apply(extract_from_number)
-    inv_key["Key_inv_digits"] = inv_key["Key_inv_best"].apply(only_digits)
-    inv_key = inv_key.rename(columns={"Klientas": "Klientas_inv", "SutartiesID": "SutartiesID_inv"})
-
-    inv_key = inv_key.sort_values(["Data", "Saskaitos_NR"])
-    inv_key = inv_key[inv_key["Key_inv_best"].astype(str).str.strip() != ""].copy()
-    inv_key_unique = (
-        inv_key.drop_duplicates(subset=["Key_inv_best"], keep="last")[
-            ["Key_inv_best", "Key_inv_digits", "Klientas_inv", "SutartiesID_inv"]
-        ]
-    )
-
+# 2) Iš KREDITINIŲ: nuoroda į išrašytą sąskaitą iš „Pastabų“
+if crn_f is None or crn_f.empty:
+    st.info("Kreditinių šiame laikotarpyje nėra – pririšti nėra ko.")
+    out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
+    out["Israsyta"] = out["Israsyta"].apply(floor2)
+    out["Kredituota"] = 0.0
+    out["Faktas"] = out["Israsyta"]
+    out["Like"] = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
+else:
     work = crn_f.copy()
-    work["Key_crn"] = work.get("Pastabos", pd.Series(index=work.index, dtype=str)).apply(extract_last_from_notes)
-    work["Key_crn_digits"] = work["Key_crn"].apply(only_digits)
+    work["Key_ref"] = work.get("Pastabos", pd.Series(index=work.index, dtype=str)).apply(extract_last_from_notes)
 
-    work = work.merge(
-        inv_key_unique,
-        left_on="Key_crn",
-        right_on="Key_inv_best",
-        how="left",
-    )
+    # 3) Sujungiame kreditinę su IŠRAŠYTA sąskaita per nuorodos raktą
+    work = work.merge(inv_key_unique, left_on="Key_ref", right_on="Key_inv_best", how="left")
 
-    mask_unmatched = work["SutartiesID_inv"].isna() | (work["SutartiesID_inv"].astype(str).str.strip() == "")
-    if mask_unmatched.any():
-        inv_digits_map = inv_key_unique[["Key_inv_digits", "Klientas_inv", "SutartiesID_inv"]].drop_duplicates(
-            subset=["Key_inv_digits"]
-        )
-        fallback = work.loc[mask_unmatched, ["Key_crn_digits"]].merge(
-            inv_digits_map, left_on="Key_crn_digits", right_on="Key_inv_digits", how="left"
-        )
-        work.loc[mask_unmatched, "Klientas_inv"] = fallback["Klientas_inv"].values
-        work.loc[mask_unmatched, "SutartiesID_inv"] = fallback["SutartiesID_inv"].values
-
-    work["Klientas_final"] = work["Klientas_inv"]
-    work["SutartiesID_final"] = work["SutartiesID_inv"].fillna("").astype(str).str.strip()
-
+    # 4) Kreditinės sumos (teigiama reikšmė mažinimui)
     work["Suma_su_PVM"] = work["Suma_su_PVM"].astype(float).fillna(0.0)
     work["Kredituota_pos"] = work["Suma_su_PVM"].abs()
-    work_ok = work[work["SutartiesID_final"].astype(str).str.strip() != ""].copy()
 
-    crn_sum = (
-        work_ok.groupby(["Klientas_final", "SutartiesID_final"], dropna=False)["Kredituota_pos"]
-        .sum()
-        .reset_index()
-        .rename(
-            columns={
-                "Klientas_final": "Klientas",
-                "SutartiesID_final": "SutartiesID",
-                "Kredituota_pos": "Kredituota",
-            }
+    # 5) Paliekame tik tas kreditines, kurios sėkmingai paveldėjo sutartį iš IŠRAŠYTOS sąskaitos
+    work_ok = work[work["SutartiesID_inv"].astype(str).str.strip() != ""].copy()
+
+    # 6) Agreguojame „Kredituota“ sutarties lygiu
+    if not work_ok.empty:
+        crn_sum = (
+            work_ok.groupby(["Klientas_inv", "SutartiesID_inv"], dropna=False)["Kredituota_pos"]
+            .sum()
+            .reset_index()
+            .rename(columns={
+                "Klientas_inv": "Klientas",
+                "SutartiesID_inv": "SutartiesID",
+                "Kredituota_pos": "Kredituota"
+            })
         )
-    )
+    else:
+        crn_sum = pd.DataFrame(columns=["Klientas", "SutartiesID", "Kredituota"])
 
+    # 7) Į Likučius: sujungiame „Kredituota“ ir perskaičiuojame Faktą/Like
     out = pd.merge(plans, inv_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Israsyta": 0.0})
     out = pd.merge(out, crn_sum, how="left", on=["Klientas", "SutartiesID"]).fillna({"Kredituota": 0.0})
-    out["Israsyta"] = out["Israsyta"].apply(floor2)
+    out["Israsyta"]  = out["Israsyta"].apply(floor2)
     out["Kredituota"] = out["Kredituota"].apply(floor2)
-    out["Faktas"] = (out["Israsyta"] - out["Kredituota"]).apply(floor2)
-    out["Like"] = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
+    out["Faktas"]    = (out["Israsyta"] - out["Kredituota"]).apply(floor2)
+    out["Like"]      = (out["SutartiesPlanas"] - out["Faktas"]).apply(floor2)
+
+    # 8) Metrika – kiek kreditinių pavyko pririšti
+    st.metric("Pririštų kreditinių skaičius", f"{len(work_ok):,}")
 
 # =================== KPI ir Likučių lentelė ===================
 st.divider()
@@ -500,15 +458,9 @@ out["PctIsnaudota"] = out["PctIsnaudota"].clip(lower=0, upper=999)
 out["Progresas"] = out["PctIsnaudota"].apply(progress_bar)
 
 cols_order = [
-    "Klientas",
-    "SutartiesID",
-    "SutartiesPlanas",
-    "Israsyta",
-    "Kredituota",
-    "Faktas",
-    "Like",
-    "PctIsnaudota",
-    "Progresas",
+    "Klientas", "SutartiesID", "SutartiesPlanas",
+    "Israsyta", "Kredituota", "Faktas", "Like",
+    "PctIsnaudota", "Progresas"
 ]
 show_cols = [c for c in cols_order if c in out.columns]
 st.dataframe(out[show_cols].sort_values(["Klientas", "SutartiesID"]), use_container_width=True)
@@ -526,7 +478,8 @@ sel_client = st.selectbox("Pasirink Klientą", options=klientai, index=0 if klie
 sutartys = []
 if sel_client:
     sutartys = sorted(
-        sel_df.loc[sel_df["Klientas"] == sel_client, "SutartiesID"].dropna().astype(str).str.strip().unique().tolist()
+        sel_df.loc[sel_df["Klientas"] == sel_client, "SutartiesID"]
+        .dropna().astype(str).str.strip().unique().tolist()
     )
 sel_contract = st.selectbox("Pasirink Sutartį", options=sutartys, index=0 if sutartys else None)
 
@@ -551,6 +504,7 @@ if sel_client and sel_contract:
 
         st.dataframe(one[show_cols], use_container_width=True)
 
+        # Eksportas – tik ši sutartis
         buf_one = BytesIO()
         with pd.ExcelWriter(buf_one, engine="openpyxl") as xw:
             one[show_cols].to_excel(xw, sheet_name=safe_sheet_name(sel_contract, "Sutartis"), index=False)
